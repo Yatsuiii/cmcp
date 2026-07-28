@@ -194,7 +194,7 @@ A `GatewayClaim` is the unit of proof handed to an auditor, regulator, or downst
 
 | Field | Description |
 |---|---|
-| `trace.eat_profile` | EAT profile URI: `tag:agentrust.io,2026:trace-v0.1` |
+| `trace.eat_profile` | EAT profile URI: `tag:agentrust-io.com,2026:trace-v0.2` |
 | `trace.runtime` | TEE platform and hardware measurement recorded at enclave boot |
 | `trace.policy.bundle_hash` | SHA-256 of the Cedar bundle loaded at startup; changing any policy file changes this value |
 | `trace.cnf.jwk` | Ed25519 public key bound to the TEE signing key |

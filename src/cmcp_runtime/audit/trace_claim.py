@@ -184,7 +184,7 @@ class GatewayTrace(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    eat_profile: Literal["tag:agentrust.io,2026:trace-v0.1"]
+    eat_profile: Literal["tag:agentrust-io.com,2026:trace-v0.2"]
     iat: Annotated[int, Field(ge=1700000000)]
     subject: Annotated[str, Field(pattern=r"^spiffe://")]
     runtime: RuntimeInfo
@@ -376,7 +376,7 @@ def generate_trace_claim(
     )
 
     trace = GatewayTrace(
-        eat_profile="tag:agentrust.io,2026:trace-v0.1",
+        eat_profile="tag:agentrust-io.com,2026:trace-v0.2",
         iat=int(datetime.now(tz=UTC).timestamp()),
         subject=_build_subject(signing_key),
         runtime=_build_runtime(attestation_report),

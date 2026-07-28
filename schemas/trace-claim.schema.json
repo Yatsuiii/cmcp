@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cmcp.agentrust-io.com/schemas/trace-claim.schema.json",
   "title": "cMCP GatewayClaim",
-  "description": "TRACE profile envelope emitted by the cMCP Gateway TEE at session close. The 'trace' sub-object contains canonical TRACE v0.1 fields; 'gateway' contains cmcp-specific addenda.",
+  "description": "TRACE profile envelope emitted by the cMCP Gateway TEE at session close. The 'trace' sub-object contains canonical TRACE v0.2 fields; 'gateway' contains cmcp-specific addenda.",
   "type": "object",
   "additionalProperties": false,
   "required": ["cmcp_version", "trace", "gateway", "signature"],
@@ -16,11 +16,11 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["eat_profile", "iat", "subject", "runtime", "policy", "data_class", "cnf"],
-      "description": "Canonical TRACE v0.1 fields for this gateway session.",
+      "description": "Canonical TRACE v0.2 fields for this gateway session.",
       "properties": {
         "eat_profile": {
           "type": "string",
-          "const": "tag:agentrust.io,2026:trace-v0.1"
+          "const": "tag:agentrust-io.com,2026:trace-v0.2"
         },
         "iat": {
           "type": "integer",
