@@ -1,0 +1,165 @@
+# Hardware validation
+
+What has been verified against real confidential-computing hardware, what has
+not, and how to reproduce each run. [STATUS.md](../../STATUS.md) links here
+rather than restating it.
+
+The rule this page exists to enforce: no document describes cMCP as
+hardware-attested for a platform until a genuine quote from that platform has
+been verified end to end by `cmcp_verify`, and the run is recorded below.
+
+## Current state
+
+| Platform | Report parsing | Certificate chain | Report signature | Verified against real hardware evidence |
+|---|---|---|---|---|
+| AMD SEV-SNP (Azure CVM, vTPM-rooted) | Yes | Yes, to the real AMD ARK-Milan root | Yes | **Yes**, 2026-07-27, both from a stored capture and **live inside a running CVM** |
+| Intel TDX (GCP C3, non-paravisor) | Yes | Yes, to the pinned Intel SGX Root CA | Yes | **Yes**, 2026-07-27, capture of 2026-07-21 |
+| TPM 2.0 (Azure vTPM, Trusted Launch) | Yes | Not in Phase 1 (`ek_cert_chain` stays unverified) | Not in Phase 1 | **Partly**, 2026-07-27. Parse and freshness binding yes; signature and chain are out of Phase 1 scope |
+| NVIDIA GPU CC (H100/H200) | Not implemented | | | No |
+
+"Verified against real hardware evidence" means the committed verifier accepted a
+quote produced by that silicon, with signature and chain checks live, and rejects
+a tampered copy. It does not mean cMCP has run *inside* that TEE in production;
+quote generation still requires the corresponding hardware.
+
+## Scope of the guarantee
+
+Verification is bounded to a remote or rogue-admin adversary. It does not hold
+against an adversary with physical access to the hardware:
+[TEE.fail](https://tee.fail) demonstrates attestation-key extraction from
+fully-patched SEV-SNP and TDX with a sub-$1000 DDR5 interposer. See
+[LIMITATIONS.md](../../LIMITATIONS.md).
+
+## SEV-SNP, Azure confidential VM
+
+Evidence: an HCL report read from the vTPM NV index `0x01400001` on an Azure
+DCasv5 CVM (family 0x19 / model 0x01, Milan), plus the VCEK and the AMD
+ASK/ARK chain. Azure SEV-SNP is paravisor-mediated, so `REPORT_DATA` binds the
+vTPM attestation key rather than a cMCP-supplied nonce directly; the nonce is
+carried in the AK-signed TPM quote's `extraData` and the two are bound together
+by `cmcp_verify.azure_cvm.verify_azure_cvm_measurement`.
+
+What the run checks: the paravisor `REPORT_DATA == sha256(runtime_data)`
+binding, the VCEK chain to the genuine AMD ARK-Milan root, and the ECDSA-P384
+report signature over the report body.
+
+```
+CMCP_AZURE_FIXTURE_DIR=<capture dir> pytest tests/unit/test_azure_cvm_verify.py
+```
+
+The capture directory holds `hcl.bin`, `vcek.der` and `cert_chain.pem`. It is
+**not** committed: the SNP report's 64-byte `CHIP_ID` is a per-CPU hardware
+identifier. Zeroing it invalidates the signature, so a redacted vector cannot
+exercise the signature path, which is why this test is env-gated instead of
+running in CI.
+
+## Live run inside a SEV-SNP confidential VM
+
+The runs above appraise stored evidence. On 2026-07-27 the collector and the
+verifier were also run **inside** a real Azure confidential VM
+(`Standard_DC2ads_v5`, Ubuntu 24.04 CVM image, eastus; the guest reports
+`Detected confidential virtualization sev-snp` and `Memory Encryption Features
+active: AMD SEV`, with `SEV: Status: vTom` and no `/dev/sev-guest`, the expected
+paravisor shape).
+
+`AzureCVMProvider.detect()` returned true, the provider collected 13,004 bytes of
+live evidence under a caller nonce, and `verify_azure_cvm_measurement` returned
+`verified: true` with **no unverified fields**:
+
+| Verified field | What it establishes |
+|---|---|
+| `quote_nonce_binding` | The caller's nonce is in the AK-signed TPM quote's extraData |
+| `ak_binding` | The vTPM AK is bound into the SNP report's `REPORT_DATA` by the paravisor |
+| `runtime_data_binding` | `REPORT_DATA == sha256(runtime_data)` holds on the live report |
+| `measurement` | The launch measurement matches the collected report |
+| `vcek_cert_chain` | The VCEK fetched from AMD KDS for this CPU chains to `CN=ARK-Milan` |
+| `report_signature` | The SNP report signature verifies under that VCEK |
+
+A wrong nonce was rejected with `quote_nonce_mismatch`, so freshness is enforced
+rather than assumed.
+
+Two deployment facts this surfaced, both worth knowing before anyone repeats it:
+
+- The gateway process needs TPM device access. `AzureCVMProvider` shells out to
+  `tpm2_nvread` without elevation, so the service user must be in the `tss`
+  group (`/dev/tpmrm0` is `tss:tss`). Without it the provider fails with a TCTI
+  load error, not an attestation error, which reads as a broken TPM rather than
+  a permissions problem.
+- `verify_azure_cvm_measurement(..., trusted_ark_pem=...)` wants the ARK alone.
+  Passing AMD KDS's `cert_chain` endpoint output, which is the ASK **and** the
+  ARK, yields `vcek_chain_invalid`. Extract the self-signed root first.
+
+What this still does not establish: cMCP serving live MCP traffic from inside the
+enclave with a policy bundle measured at boot. This validates attestation
+collection and verification in situ, which is the part that was never exercised
+on hardware, not a production gateway deployment.
+
+## Intel TDX, GCP C3 confidential VM
+
+Evidence: a DCAP v4 ECDSA quote from a GCP C3 CVM (non-paravisor TDX, kernel
+6.17, configfs-TSM `tdx_guest` provider). Non-paravisor TDX is guest-controlled,
+so `REPORTDATA` carries the value cMCP supplies.
+
+What the run checks: the attestation key's ECDSA-P256 signature over the quote
+header plus TD report body, the QE report binding
+(`report_data[:32] == sha256(att_pub || qe_auth)`), the PCK signature over the
+QE report, and the PCK chain to the pinned Intel SGX Root CA.
+
+```
+CMCP_TDX_FIXTURE_DIR=<capture dir> pytest tests/unit/test_tdx_quote_verify.py
+```
+
+The capture directory holds `tdx_quote.bin`. Optional: `collateral/intel_root_ca.pem`
+to override the pinned root, and `report_data.hex` to assert the report_data
+binding. The quote is not committed: the PCK certificate identifies the CPU.
+
+This run is what found the parser defect fixed alongside this page. Real DCAP v4
+quotes nest the Quoting Enclave material under a type-6
+`QE_REPORT_CERTIFICATION_DATA` header; the parser read the QE report six bytes
+early, so every genuine quote was rejected with
+`attestation_key_not_bound_to_qe` while the synthetic tests, which emitted the
+same flat layout, passed. Failure was closed, so this was a false negative
+rather than an unsound accept, but the TDX path had never worked against real
+evidence. Synthetic self-consistency is not validation.
+
+## TPM 2.0, Azure Trusted Launch vTPM
+
+Evidence: a `TPMS_ATTEST` quote over PCRs 0-7 (SHA-256) from a `Standard_D2s_v7`
+Ubuntu 24.04 VM with Trusted Launch, vTPM and secure boot enabled, taken under a
+fresh 32-byte nonce.
+
+What the run checks, within Phase 1's parse-only scope: parsing a real attest
+blob, the magic constant, the PCR digest matching the measurement field, and the
+qualifying-data binding equalling the nonce (with a different nonce correctly
+leaving `qualifying_data` unverified).
+
+```
+CMCP_TPM_FIXTURE_DIR=<capture dir> pytest tests/unit/test_tpm_verify.py
+```
+
+This run also surfaced an interop gap, fixed alongside it. The parser required
+the outer `TPM2B_ATTEST` two-byte size prefix, but `tpm2_quote -m` writes a bare
+`TPMS_ATTEST`, so every quote produced by the standard tooling was rejected with
+`TPM2B_ATTEST size field invalid`. Both framings are now accepted, told apart by
+the magic constant.
+
+Still out of scope for Phase 1 and unchanged by this run: the AK signature and
+the EK/AK certificate chain, which stay in `unverified_fields`. Note also that
+Azure's pre-provisioned AK certificate (vTPM NV index `0x01C101D0`, issuer
+`CN=Global Virtual TPM CA - 03`) certifies a different key than an in-guest
+`tpm2_createak` AK, and carries no AIA extension, so its issuing intermediate is
+not fetchable from it.
+
+## Not yet validated
+
+- **TPM signature and certificate chain**: out of Phase 1 scope here. The
+  sibling [ca2a](https://github.com/agentrust-io/ca2a) verifier does check the AK
+  signature and has now done so against this same real quote.
+- **NVIDIA GPU CC**: not implemented, planned for v0.2 via NRAS.
+- **cMCP serving traffic from inside the TEE**: attestation collection and
+  verification now run in situ on a CVM (above). A production gateway serving
+  MCP traffic from inside the enclave, with the policy bundle measured at boot
+  and TRACE Claims emitted per session, is still a separate milestone.
+- **TCB appraisal**: TCB status and QE identity need Intel PCS collateral by
+  FMSPC and are reported in `unverified_fields`. Do not read a `verified=True`
+  TDX result as a full TCB appraisal.
