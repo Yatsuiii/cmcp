@@ -9,7 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Moved every `agentrust.io` identifier to `agentrust-io.com`: the JSON Schema `$id` values for `trace-claim`, `audit-entry`, and `catalog-entry`, the `@context` URL in test fixtures, and the maintainer email. `agentrust.io` is not ours and resolves to parked AWS addresses, so these identifiers pointed at a domain we do not control. They never resolved, so nothing that worked stops working. The `tag:agentrust.io,2026:trace-v0.1` EAT profile identifier is deliberately unchanged; it is a cross-repo identifier inside signed payloads and needs a transition decision, not a rename.
+- **BREAKING: TRACE Claims now carry the v0.2 profile** `tag:agentrust-io.com,2026:trace-v0.2`, and `agentrust-trace` is pinned to `>=0.5`. The v0.1 URI named `agentrust.io`, a domain this project never controlled, which RFC 4151 does not permit for a tag URI (agentrust-io/trace-spec#107). A verifier on the v0.2 suite rejects a v0.1 claim, so producers and verifiers move together. Nothing else about the claim format changed.
+
+### Changed
+
+- Moved every `agentrust.io` identifier to `agentrust-io.com`: the JSON Schema `$id` values for `trace-claim`, `audit-entry`, and `catalog-entry`, the `@context` URL in test fixtures, and the maintainer email. `agentrust.io` is not ours and resolves to parked AWS addresses, so these identifiers pointed at a domain we do not control. They never resolved, so nothing that worked stops working. The `tag:agentrust-io.com,2026:trace-v0.2` EAT profile identifier is deliberately unchanged; it is a cross-repo identifier inside signed payloads and needs a transition decision, not a rename.
 
 ### Fixed
 

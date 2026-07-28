@@ -130,14 +130,14 @@ Network position: sits between agent host and MCP servers. The gateway is the on
 The unit of proof handed to an auditor, produced per session (or per call, configurable).
 The normative schema is `schemas/trace-claim.schema.json`,
 and a full worked example is in [the quickstart](quickstart.md). The envelope is a
-`GatewayClaim`: canonical TRACE v0.1 fields live under `trace`, cMCP-specific addenda live
+`GatewayClaim`: canonical TRACE v0.2 fields live under `trace`, cMCP-specific addenda live
 under `gateway`, and `signature` is detached (computed over every other field).
 
 ```json
 {
   "cmcp_version": "1.0",
   "trace": {
-    "eat_profile": "tag:agentrust.io,2026:trace-v0.1",
+    "eat_profile": "tag:agentrust-io.com,2026:trace-v0.2",
     "iat": 1730000000,
     "subject": "spiffe://cmcp.gateway/tee/<key-prefix>",
     "runtime": {

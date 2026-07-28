@@ -33,7 +33,7 @@ The key difference:
 | Can the operator forge it? | Yes | No: signing key never leaves the TEE |
 | Who can verify it? | Anyone with read access | Anyone with the public key (no trust in operator) |
 
-A TRACE Claim is a [TRACE Trust Record](https://trace.agentrust-io.com) with a `GatewayClaim` envelope. The envelope adds the session summary and audit chain. The inner trust record follows the TRACE v0.1 spec.
+A TRACE Claim is a [TRACE Trust Record](https://trace.agentrust-io.com) with a `GatewayClaim` envelope. The envelope adds the session summary and audit chain. The inner trust record follows the TRACE v0.2 spec.
 
 ### What a TRACE Claim asserts
 
