@@ -18,6 +18,7 @@ from cmcp_runtime.config import Config, EnforcementMode
 from cmcp_runtime.errors import PolicyDeny
 from cmcp_runtime.policy.annotations import parse_policy_annotations
 from cmcp_runtime.policy.bundle import PolicyBundle, PolicyStore
+from cmcp_runtime.policy.decisions import Decision, decision_for_deny
 from cmcp_runtime.session.state import SENSITIVITY_ORDER
 
 if TYPE_CHECKING:
@@ -37,6 +38,14 @@ class PolicyDecision:
     evaluation_ms: float
     # In advisory mode, allowed=True even when Cedar said deny:
     would_have_denied: bool = False
+    # AARM R4 decision type. ALLOW when Cedar permitted. On a deny this is
+    # DENY, STEP_UP, or DEFER per the matched policies' annotations, including
+    # in advisory and silent modes where the call is let through: the recorded
+    # decision reflects what policy decided, and `allowed` reflects what
+    # enforcement did. MODIFY is set by the caller once the inspection pipeline
+    # has actually altered a response, since the evaluator cannot know that at
+    # ingress. See cmcp_runtime.policy.decisions.
+    decision: Decision = Decision.ALLOW
 
 
 class PolicyEvaluator:
@@ -171,10 +180,15 @@ class PolicyEvaluator:
                 advice=advice,
             )
 
+        # Policy decided a non-allow outcome. Record which one even though
+        # advisory and silent modes let the call through: `decision` is what
+        # policy decided, `allowed` is what enforcement did.
+        denied_as = decision_for_deny(advice)
+
         if self._mode == EnforcementMode.ADVISORY:
             logger.info(
-                "ADVISORY deny (allowed through): tool=%s rule=%s",
-                context.get("tool_name"), rule,
+                "ADVISORY %s (allowed through): tool=%s rule=%s",
+                denied_as.value, context.get("tool_name"), rule,
             )
             return PolicyDecision(
                 allowed=True,
@@ -183,6 +197,7 @@ class PolicyEvaluator:
                 advice=advice,
                 evaluation_ms=evaluation_ms,
                 would_have_denied=True,
+                decision=denied_as,
             )
 
         # SILENT mode - allow, no log
@@ -193,6 +208,7 @@ class PolicyEvaluator:
             advice=advice,
             evaluation_ms=evaluation_ms,
             would_have_denied=True,
+            decision=denied_as,
         )
 
     def authorize_egress(
