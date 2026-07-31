@@ -62,6 +62,13 @@ class PolicyDeny(CMCPError):
         # Annotations of the forbid policies that caused this deny - sourced
         # from the hash-pinned policy bundle, safe to reflect to the caller.
         self.advice: dict[str, str] = advice or {}
+        # AARM R4: a deny is DENY, STEP_UP, or DEFER depending on the matched
+        # policies' annotations. Classified once here so every caller that
+        # handles a deny records the same decision instead of re-deriving it.
+        # Imported locally to keep errors.py out of a policy-package cycle.
+        from cmcp_runtime.policy.decisions import decision_for_deny
+
+        self.aarm_decision = decision_for_deny(self.advice)
 
 
 class CatalogToolNameCollision(CMCPError):

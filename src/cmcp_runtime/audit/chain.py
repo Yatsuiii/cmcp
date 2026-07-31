@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
@@ -32,7 +33,13 @@ EntryType = Literal[
     "break_glass_used",
 ]
 
-PolicyDecision = Literal["allow", "deny", "redact", "advisory_deny", "fault", "n/a"]
+# "step_up" and "defer" are the AARM R4 decision types that have no older cMCP
+# equivalent; see cmcp_runtime.policy.decisions for the full crosswalk. Widening
+# this Literal adds no field to AuditEntry, so entry hashes for existing values
+# are unchanged and previously written chains still verify.
+PolicyDecision = Literal[
+    "allow", "deny", "redact", "advisory_deny", "step_up", "defer", "fault", "n/a"
+]
 
 InspectionResult = Literal[
     "pass", "injection_detected", "schema_violation", "surplus_stripped", "size_exceeded", "n/a"
@@ -102,10 +109,20 @@ class AuditChain:
     internal hash-chain check still runs.
     """
 
-    def __init__(self, session_id: str, store: SqliteAuditStore | None = None) -> None:
+    def __init__(
+        self,
+        session_id: str,
+        store: SqliteAuditStore | None = None,
+        sinks: list[Callable[[AuditEntry], None]] | None = None,
+    ) -> None:
         self._session_id = session_id
         self._entries: list[AuditEntry] = []
         self._store = store
+        # Read-only observers of appended entries, used for telemetry export
+        # (AARM R8). Sinks run after the entry is hashed and persisted and
+        # cannot influence the chain: a sink that raises is isolated in
+        # append() so telemetry can never fail a tool call or break the chain.
+        self._sinks: list[Callable[[AuditEntry], None]] = list(sinks or [])
         # AUDIT-002: TEE-anchored chain root.  None until set_tee_anchor() is called.
         self._tee_anchor: str | None = None
         # AUDIT-006: per-session attestation report whose report_data commits the
@@ -230,7 +247,26 @@ class AuditChain:
         if self._store is not None:
             self._store.append(entry)
         self._entries.append(entry)
+        self._notify_sinks(entry)
         return entry
+
+    def add_sink(self, sink: Callable[[AuditEntry], None]) -> None:
+        """Register a read-only observer of appended entries. See __init__."""
+        self._sinks.append(sink)
+
+    def _notify_sinks(self, entry: AuditEntry) -> None:
+        """
+        Fan the entry out to sinks, isolating failures.
+
+        The chain is already durable at this point, so a sink raising must not
+        propagate: telemetry is not allowed to fail a tool call. Logged at debug
+        because a collector that is down would otherwise flood the log.
+        """
+        for sink in self._sinks:
+            try:
+                sink(entry)
+            except Exception:
+                logger.debug("Audit sink %r failed", sink, exc_info=True)
 
     @property
     def chain_root(self) -> str:

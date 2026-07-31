@@ -61,6 +61,16 @@ The catalog binds each tool name to a specific upstream server identity, which p
 - **cMCP is not a network proxy.** It does not perform general-purpose HTTP proxying, TLS termination for arbitrary traffic, or routing outside the MCP protocol. It proxies MCP tool calls only.
 - **cMCP is not responsible for MCP server bugs.** The gateway enforces policy and records what happened. Bugs in upstream MCP servers -- memory corruption, logic errors, incorrect data handling -- are outside the gateway's control and are not attested by the TRACE Claim.
 
+## AARM v1.0 decision types: what is enforced versus classified
+
+cMCP records the five AARM R4 decision types (see `cmcp_runtime.policy.decisions` for the crosswalk). Three caveats on what that means in practice.
+
+- **DEFER is classified, not asynchronously enforced.** AARM's DEFER means asynchronous evaluation with a callback. A policy annotated `@aarm_decision("defer")` produces a blocked call recorded as `defer` with its advice payload attached. The gateway does not hold the MCP request open pending an out-of-band decision, because it has no callback registry and keeping requests open across a policy round trip is a transport design decision. Do not read a `defer` entry as evidence that a deferred decision was later resolved.
+- **STEP_UP blocks the call.** A `step_up` entry means policy refused and named a human authority who can authorize it, and the caller receives that authority in `advice`. The call itself did not proceed, and no in-band re-submission path exists yet.
+- **MODIFY is recorded as `redact`.** cMCP's modification mechanism is response redaction and surplus stripping in the inspection pipeline, so that is the value the audit chain and the audit-entry schema carry. There is no separate `modify` value.
+
+The TRACE Claim schema is unchanged by this. `trace-claim.schema.json` pins its per-call decision enum to the pre-AARM vocabulary, and widening it would change what a version `1.0` claim can contain, which an older verifier would reject. Widening it is a TRACE specification decision spanning `trace-spec` and `trace-tests`, not a cMCP one. Until that is settled, `step_up` and `defer` are visible in the audit chain and in telemetry, and a claim reports the coarser value.
+
 ## Performance
 
 Attestation is a startup cost, not a per-call cost. Per-call gateway overhead covers Cedar policy evaluation, audit entry creation, and routing. Upstream tool execution time is excluded.

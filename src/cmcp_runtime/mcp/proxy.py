@@ -29,6 +29,7 @@ from cmcp_runtime.catalog.loader import CatalogEntry, ToolCatalog
 from cmcp_runtime.config import Config
 from cmcp_runtime.errors import PolicyDeny, UpstreamToolError, UpstreamUnavailable
 from cmcp_runtime.mcp import tls_pinning
+from cmcp_runtime.policy.decisions import audit_value
 from cmcp_runtime.policy.evaluator import PolicyEvaluator
 from cmcp_runtime.session.call_log import CallLog, CallRecord, SessionCallLog
 from cmcp_runtime.session.state import SessionState
@@ -558,12 +559,19 @@ class CMCPProxy:
             would_have_denied = decision.would_have_denied
             ingress_advice = decision.advice
         except PolicyDeny as exc:
+            # AARM R4: the call is blocked either way, and which of DENY,
+            # STEP_UP, or DEFER applies comes from the matched policies'
+            # annotations and is classified on the exception. Recording the
+            # specific decision is what lets an auditor tell "refused" apart
+            # from "needs an approver", which the caller also learns from
+            # `advice` below.
+            denied_as = audit_value(exc.aarm_decision)
             self._audit.append(
                 "tool_call",
                 call_id=call_id,
                 tool_name=tool_name,
                 server_identity=entry.server.url,
-                policy_decision="deny",
+                policy_decision=denied_as,
                 policy_rule_matched=str(exc),
                 request_payload_hash=request_payload_hash,
                 session_sensitivity_before=sensitivity_before,
@@ -577,10 +585,10 @@ class CMCPProxy:
                 duration_ms=elapsed_ms,
                 allowed=False,
                 sensitivity_before=sensitivity_before,
-                stage_results={"policy": "deny"},
+                stage_results={"policy": denied_as},
                 call_id=call_id,
                 catalog_entry=entry,
-                policy_decision="deny",
+                policy_decision=denied_as,
             )
             return CallResult(
                 call_id=call_id,

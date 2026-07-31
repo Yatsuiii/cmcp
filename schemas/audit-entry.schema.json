@@ -75,8 +75,18 @@
     },
     "policy_decision": {
       "type": ["string", "null"],
-      "enum": ["allow", "deny", "redact", "advisory_deny", "fault", "n/a", null],
-      "description": "Cedar policy decision for this entry; null for non-evaluated entry types."
+      "enum": [
+        "allow",
+        "deny",
+        "redact",
+        "advisory_deny",
+        "step_up",
+        "defer",
+        "fault",
+        "n/a",
+        null
+      ],
+      "description": "Cedar policy decision for this entry; null for non-evaluated entry types. step_up and defer are the AARM R4 decision types with no older cMCP equivalent, and redact carries AARM MODIFY; see cmcp_runtime.policy.decisions for the crosswalk. Widening this enum is additive, so entries written before it still validate."
     },
     "policy_rule_matched": {
       "type": ["string", "null"],

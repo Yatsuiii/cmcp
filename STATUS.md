@@ -31,6 +31,10 @@ picture is stated once. Developer Preview: interfaces may change before v1.0.
 | Transparency-log anchoring for TRACE Claims | v0.2 | Write and lookup. |
 | Server-side (provider) attestation | Not yet (Phase 2) | Phase 1 attests the gateway boundary only. |
 | Real-time policy update without enclave restart | Not yet | `policy_reload_interval_seconds` is `0`; a policy change requires a restart. |
+| AARM R4 five decision types | Shipped, with caveats | ALLOW, DENY, MODIFY, STEP_UP, DEFER are recorded in the audit chain. MODIFY is recorded as `redact`, DEFER is classified but not asynchronously enforced, and the TRACE Claim still carries the pre-AARM vocabulary. See [LIMITATIONS.md](LIMITATIONS.md). |
+| AARM R8 telemetry export | Shipped | OpenTelemetry spans mirroring audit entries. Opt in with `CMCP_OTEL_ENABLED=1` and `pip install cmcp-runtime[otel]`; a no-op otherwise. Exports digests, never payloads. The audit chain stays authoritative. |
+| AARM R2/R3 declared intent | Not implemented | cMCP takes no declared-intent input, so the intent-alignment half of R2 and R3 is unmet. Adding one changes the MCP-facing surface. |
+| AARM R7 semantic distance from intent | Not implemented | Catalog rug-pull detection and injection detection are present; neither measures distance from a stated intent. |
 | Full RATS/EAT conformance | v1.0 target | Claims are EAT-shaped today; full conformance is tracked for v1.0. |
 
 See [ROADMAP.md](ROADMAP.md) for version sequencing,
