@@ -44,12 +44,23 @@ than from gateway heuristics.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from cmcp_runtime.audit.chain import PolicyDecision as AuditPolicyDecision
+
+#: The pre-AARM decision vocabulary that TRACE Claim v1.0 pins. Kept separate
+#: from the audit vocabulary because a claim and an audit entry are now allowed
+#: to disagree in one specific way: see claim_value().
+ClaimDecision = Literal["allow", "deny", "redact", "advisory_deny", "fault", "n/a"]
 
 __all__ = [
     "AARM_DECISION_ANNOTATION",
     "ESCALATION_ADVICE_KEYS",
+    "ClaimDecision",
     "Decision",
     "audit_value",
+    "claim_value",
     "decision_for_deny",
 ]
 
@@ -107,7 +118,7 @@ def decision_for_deny(advice: dict[str, str] | None) -> Decision:
     return Decision.DENY
 
 
-def audit_value(decision: Decision) -> str:
+def audit_value(decision: Decision) -> AuditPolicyDecision:
     """
     Map a Decision onto the audit chain's ``policy_decision`` vocabulary.
 
@@ -118,4 +129,30 @@ def audit_value(decision: Decision) -> str:
     """
     if decision is Decision.MODIFY:
         return "redact"
-    return decision.value
+    # StrEnum members are their values, and every remaining member is in the
+    # audit Literal, which the schema-parity test in the AARM suite enforces.
+    return decision.value  # type: ignore[return-value]
+
+
+def claim_value(audit_decision: str | None) -> ClaimDecision:
+    """
+    Narrow an audit ``policy_decision`` to what a TRACE Claim v1.0 accepts.
+
+    The claim schema pins its decision enum under version ``1.0``, so a claim
+    cannot carry ``step_up`` or ``defer`` without making new claims fail older
+    verifiers. Widening it is a TRACE specification decision spanning
+    trace-spec and trace-tests rather than a cMCP one, so until that is settled
+    both narrow to ``deny``: the call was blocked in every case, which is the
+    part a claim asserts. The audit chain keeps the specific decision, and a
+    reader who needs to tell a refusal from a needs-an-approver reads the chain.
+
+    Anything unrecognised also becomes ``deny`` rather than passing through, so
+    a future decision value cannot silently emit a claim that fails validation.
+    """
+    if audit_decision is None:
+        return "n/a"
+    if audit_decision in ("step_up", "defer"):
+        return "deny"
+    if audit_decision in ("allow", "deny", "redact", "advisory_deny", "fault", "n/a"):
+        return audit_decision  # type: ignore[return-value]
+    return "deny"

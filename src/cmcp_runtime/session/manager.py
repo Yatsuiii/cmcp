@@ -28,6 +28,7 @@ from cmcp_runtime.audit.trace_claim import (
 from cmcp_runtime.config import KillSwitchConfig
 from cmcp_runtime.errors import KillSwitchTripped
 from cmcp_runtime.kill_switch import KillSwitchEvaluator
+from cmcp_runtime.policy.decisions import claim_value
 from cmcp_runtime.session.call_log import CallLog, SessionCallLog
 from cmcp_runtime.session.state import SessionState
 from cmcp_runtime.startup import RuntimeContext
@@ -238,7 +239,11 @@ class SessionManager:
                 ToolTranscriptEntry(
                     tool_name=e.tool_name,
                     data_class=data_class,
-                    decision=e.policy_decision or "n/a",
+                    # Narrowed to the vocabulary TRACE Claim v1.0 pins: the
+                    # audit chain may hold step_up or defer, which a claim
+                    # cannot carry without failing older verifiers. See
+                    # cmcp_runtime.policy.decisions.claim_value.
+                    decision=claim_value(e.policy_decision),
                 )
             )
 

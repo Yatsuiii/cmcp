@@ -21,6 +21,7 @@ from cmcp_runtime.policy.decisions import (
     AARM_DECISION_ANNOTATION,
     Decision,
     audit_value,
+    claim_value,
     decision_for_deny,
 )
 
@@ -87,6 +88,40 @@ class TestR4DecisionVocabulary:
 
     def test_policy_deny_with_no_advice_classifies_as_deny(self) -> None:
         assert PolicyDeny("blocked").aarm_decision is Decision.DENY
+
+
+class TestClaimBoundaryNarrowing:
+    """
+    A TRACE Claim v1.0 cannot carry step_up or defer. The audit chain keeps the
+    specific decision and the claim reports the coarser one, so a new decision
+    value can never produce a claim that fails schema validation.
+    """
+
+    def test_new_decisions_narrow_to_deny(self) -> None:
+        assert claim_value("step_up") == "deny"
+        assert claim_value("defer") == "deny"
+
+    def test_pinned_vocabulary_passes_through_unchanged(self) -> None:
+        for value in ("allow", "deny", "redact", "advisory_deny", "fault", "n/a"):
+            assert claim_value(value) == value
+
+    def test_none_becomes_not_applicable(self) -> None:
+        assert claim_value(None) == "n/a"
+
+    def test_unrecognised_value_fails_closed_to_deny(self) -> None:
+        """A future decision value must not leak into a claim it would invalidate."""
+        assert claim_value("some_future_decision") == "deny"
+
+    def test_every_audit_value_narrows_into_the_claim_vocabulary(self) -> None:
+        pinned = {"allow", "deny", "redact", "advisory_deny", "fault", "n/a"}
+        for decision in Decision:
+            assert claim_value(audit_value(decision)) in pinned
+
+    def test_narrowing_preserves_the_blocked_or_allowed_distinction(self) -> None:
+        """Narrowing may lose detail; it must not turn a block into an allow."""
+        for decision in (Decision.DENY, Decision.STEP_UP, Decision.DEFER):
+            assert claim_value(audit_value(decision)) == "deny"
+        assert claim_value(audit_value(Decision.ALLOW)) == "allow"
 
 
 class TestAuditSchemaAcceptsNewDecisions:
