@@ -222,8 +222,16 @@ def _stage4_injection_detection(
                     injection_score=score,
                 )
             return StageResult(stage="injection", decision="allow")
-        except Exception:  # nosec B110
-            pass  # Fall through to regex
+        except Exception:
+            # Falling through to the local patterns is the right behaviour, but
+            # doing it silently means a broken AGT detector looks identical to a
+            # working one while the weaker starter set is what actually ran.
+            _log.warning(
+                "AGT PromptInjectionDetector.detect() failed; "
+                "falling back to local patterns v%s",
+                _PATTERNS_VERSION,
+                exc_info=True,
+            )
 
     # Fallback: regex patterns
     patterns = custom_patterns or _COMPILED_PATTERNS
@@ -288,7 +296,7 @@ def _classify_sensitivity(
 
     1. catalog_entry.sensitivity_level: always applied
     2. field-level x-sensitivity annotations in output_schema properties
-    3. pattern matching on response content (AGT CredentialRedactor or regex fallback)
+    3. pattern matching on response content (AGT CredentialRedactor and local patterns)
     """
     tags: list[str] = []
 
@@ -312,22 +320,47 @@ def _classify_sensitivity(
         except (json.JSONDecodeError, ValueError):
             pass
 
-    # Source 3: content pattern matching
+    # Source 3: content pattern matching.
+    #
+    # AGT and the local patterns both run, rather than AGT displacing them. Two
+    # reasons. First, AGT's CredentialRedactor does not redact a secret at all
+    # when a suffix is glued to it (microsoft/agent-governance-toolkit#3494:
+    # `AKIA..._old` passes through whole), so treating it as sufficient leaves a
+    # live key untagged. Second, an either/or meant any breakage on the AGT path
+    # silently disabled content classification entirely instead of degrading to
+    # the local patterns.
     if response_text:
+        _SENSITIVE = ("pii", "confidential", "hipaa_phi", "mnpi")
+
         if _AGT_AVAILABLE and _agt_redactor is not None:
-            try:
-                matches = _agt_redactor.find_credentials(response_text)
-                if matches and not any(t in tags for t in ("pii", "confidential", "hipaa_phi", "mnpi")):
-                    tags.append("pii")
-            except Exception:  # nosec B110
-                pass
-        else:
-            # Regex fallback for when AGT is unavailable
-            for pattern, tag in _PII_PATTERNS:
-                if pattern.search(response_text) and tag not in tags:
-                    tags.append(tag)
-                    if len(tags) >= 4:  # cap scan at 4 distinct tags
-                        break
+            # find_matches covers secrets, find_pii_matches covers PII spans.
+            # Both are classmethods on CredentialRedactor. A previous version
+            # called `find_credentials`, which has never existed on that class
+            # in any agt-core release, so this whole branch raised AttributeError
+            # into the handler below and contributed nothing.
+            for method in ("find_matches", "find_pii_matches"):
+                finder = getattr(_agt_redactor, method, None)
+                if finder is None:
+                    # Narrow and loud: an AGT API that moved should surface as a
+                    # degraded stage, not as silent unconditional passing.
+                    _log.warning(
+                        "AGT CredentialRedactor has no %s(); "
+                        "falling back to local patterns for content classification",
+                        method,
+                    )
+                    continue
+                try:
+                    if finder(response_text) and not any(t in tags for t in _SENSITIVE):
+                        tags.append("pii")
+                except Exception:  # nosec B110 - never let detection break the pipeline
+                    _log.warning("AGT CredentialRedactor.%s() failed", method, exc_info=True)
+
+        # Local patterns always run, as a second pass rather than a fallback.
+        for pattern, tag in _PII_PATTERNS:
+            if len(tags) >= 4:  # cap scan at 4 distinct tags
+                break
+            if pattern.search(response_text) and tag not in tags:
+                tags.append(tag)
 
     return tags
 
@@ -339,7 +372,7 @@ class SensitivityClassificationStage:
     Applies three classification sources in order:
     1. catalog_entry.sensitivity_level annotation
     2. x-sensitivity field-level tags in output_schema properties
-    3. Content pattern matching (AGT CredentialRedactor or regex fallback)
+    3. Content pattern matching (AGT CredentialRedactor and local patterns)
     """
 
     def run(
@@ -398,13 +431,35 @@ class InspectionPipeline:
         self._agt_redactor: Any = None
         self._agt_response_scanner: Any = None
         if _AGT_AVAILABLE:
+            # Constructed independently. Sharing one try block meant a failure in
+            # the first component skipped the other two, so a single upstream API
+            # change disabled three security components at once, silently.
             try:
                 _cfg = DetectionConfig(sensitivity=injection_sensitivity)
                 self._agt_injection_detector = PromptInjectionDetector(config=_cfg)
+            except Exception:
+                _log.warning(
+                    "AGT PromptInjectionDetector unavailable; "
+                    "stage 4 falls back to local patterns v%s",
+                    _PATTERNS_VERSION,
+                    exc_info=True,
+                )
+            try:
                 self._agt_redactor = CredentialRedactor()
+            except Exception:
+                _log.warning(
+                    "AGT CredentialRedactor unavailable; "
+                    "stage 3 falls back to local patterns",
+                    exc_info=True,
+                )
+            try:
                 self._agt_response_scanner = AGTResponseScanner()
-            except Exception:  # nosec B110
-                pass
+            except Exception:
+                _log.warning(
+                    "AGT MCPResponseScanner unavailable; "
+                    "stage 4 loses MCP-specific threat detection",
+                    exc_info=True,
+                )
 
     def run(
         self,
@@ -518,8 +573,17 @@ class InspectionPipeline:
                 injection_scanner = "timeout"
                 stage_results["injection"] = "deny"
                 agt_mcp_denied = True
-            except Exception:  # nosec B110
-                pass
+            except Exception:
+                # Unlike the timeout above this does not deny, because a scanner
+                # that errored has produced no verdict either way and stage 4's
+                # own detection still runs below. It must not be silent though:
+                # MCP-specific threat coverage is gone for this response.
+                _log.warning(
+                    "AGT MCPResponseScanner.scan_response() failed for %s; "
+                    "no MCP-specific threat coverage on this response",
+                    catalog_entry.tool_name,
+                    exc_info=True,
+                )
 
         # INJECT-002: wrap AGT PromptInjectionDetector with the same timeout bound.
         def _run_s4() -> StageResult:
