@@ -61,12 +61,12 @@
 <a id=__codelineno-0-26 name=__codelineno-0-26 href=#__codelineno-0-26></a><span class=w>  </span><span class=c1># this value at startup and refuses to start if it does not.</span>
 <a id=__codelineno-0-27 name=__codelineno-0-27 href=#__codelineno-0-27></a><span class=w>  </span><span class=c1># Format: provider-specific (e.g., hex PCR values for TPM,</span>
 <a id=__codelineno-0-28 name=__codelineno-0-28 href=#__codelineno-0-28></a><span class=w>  </span><span class=c1># AMD measurement register hex for SEV-SNP).</span>
-<a id=__codelineno-0-29 name=__codelineno-0-29 href=#__codelineno-0-29></a><span class=w>  </span><span class=c1># expected_measurement: &quot;sha256:...&quot;</span>
+<a id=__codelineno-0-29 name=__codelineno-0-29 href=#__codelineno-0-29></a><span class=w>  </span><span class=c1># expected_measurement: "sha256:..."</span>
 <a id=__codelineno-0-30 name=__codelineno-0-30 href=#__codelineno-0-30></a>
 <a id=__codelineno-0-31 name=__codelineno-0-31 href=#__codelineno-0-31></a><span class=nt>agent_manifest</span><span class=p>:</span>
 <a id=__codelineno-0-32 name=__codelineno-0-32 href=#__codelineno-0-32></a><span class=w>  </span><span class=c1># Optional signed Agent Manifest binding (#302). When set, the runtime</span>
 <a id=__codelineno-0-33 name=__codelineno-0-33 href=#__codelineno-0-33></a><span class=w>  </span><span class=c1># verifies the manifest issuer signature, checks that the authenticated</span>
-<a id=__codelineno-0-34 name=__codelineno-0-34 href=#__codelineno-0-34></a><span class=w>  </span><span class=c1># agent subject matches manifest.agent_id, and requires the manifest&#39;s</span>
+<a id=__codelineno-0-34 name=__codelineno-0-34 href=#__codelineno-0-34></a><span class=w>  </span><span class=c1># agent subject matches manifest.agent_id, and requires the manifest's</span>
 <a id=__codelineno-0-35 name=__codelineno-0-35 href=#__codelineno-0-35></a><span class=w>  </span><span class=c1># policy/catalog hashes to match the loaded runtime hashes before sessions</span>
 <a id=__codelineno-0-36 name=__codelineno-0-36 href=#__codelineno-0-36></a><span class=w>  </span><span class=c1># can be created.</span>
 <a id=__codelineno-0-37 name=__codelineno-0-37 href=#__codelineno-0-37></a><span class=w>  </span><span class=nt>path</span><span class=p>:</span><span class=w> </span><span class="l l-Scalar l-Scalar-Plain">./agent-manifest.json</span>
@@ -74,21 +74,21 @@
 <a id=__codelineno-0-39 name=__codelineno-0-39 href=#__codelineno-0-39></a><span class=w>  </span><span class=nt>authenticated_subject</span><span class=p>:</span><span class=w> </span><span class="l l-Scalar l-Scalar-Plain">spiffe://factory.example/agent/material-movement/dev</span>
 <a id=__codelineno-0-40 name=__codelineno-0-40 href=#__codelineno-0-40></a>
 <a id=__codelineno-0-41 name=__codelineno-0-41 href=#__codelineno-0-41></a><span class=c1># Path to the directory containing .cedar policy files and manifest.json.</span>
-<a id=__codelineno-0-42 name=__codelineno-0-42 href=#__codelineno-0-42></a><span class=c1># Must not contain &#39;..&#39; components. Relative paths are resolved from the</span>
+<a id=__codelineno-0-42 name=__codelineno-0-42 href=#__codelineno-0-42></a><span class=c1># Must not contain '..' components. Relative paths are resolved from the</span>
 <a id=__codelineno-0-43 name=__codelineno-0-43 href=#__codelineno-0-43></a><span class=c1># working directory at startup.</span>
 <a id=__codelineno-0-44 name=__codelineno-0-44 href=#__codelineno-0-44></a><span class=nt>policy_bundle_path</span><span class=p>:</span><span class=w> </span><span class="l l-Scalar l-Scalar-Plain">policies/</span>
 <a id=__codelineno-0-45 name=__codelineno-0-45 href=#__codelineno-0-45></a>
 <a id=__codelineno-0-46 name=__codelineno-0-46 href=#__codelineno-0-46></a><span class=c1># Path to the JSON tool catalog file.</span>
-<a id=__codelineno-0-47 name=__codelineno-0-47 href=#__codelineno-0-47></a><span class=c1># Must not contain &#39;..&#39; components.</span>
+<a id=__codelineno-0-47 name=__codelineno-0-47 href=#__codelineno-0-47></a><span class=c1># Must not contain '..' components.</span>
 <a id=__codelineno-0-48 name=__codelineno-0-48 href=#__codelineno-0-48></a><span class=nt>catalog_path</span><span class=p>:</span><span class=w> </span><span class="l l-Scalar l-Scalar-Plain">catalog.json</span>
 <a id=__codelineno-0-49 name=__codelineno-0-49 href=#__codelineno-0-49></a>
 <a id=__codelineno-0-50 name=__codelineno-0-50 href=#__codelineno-0-50></a><span class=c1># Address and port the runtime listens on.</span>
 <a id=__codelineno-0-51 name=__codelineno-0-51 href=#__codelineno-0-51></a><span class=c1># Effective defaults:</span>
-<a id=__codelineno-0-52 name=__codelineno-0-52 href=#__codelineno-0-52></a><span class=c1># - tokenless CMCP_DEV_MODE=1: &quot;127.0.0.1:8443&quot;</span>
-<a id=__codelineno-0-53 name=__codelineno-0-53 href=#__codelineno-0-53></a><span class=c1># - authenticated or production operation: &quot;0.0.0.0:8443&quot; (unless explicitly configured)</span>
+<a id=__codelineno-0-52 name=__codelineno-0-52 href=#__codelineno-0-52></a><span class=c1># - tokenless CMCP_DEV_MODE=1: "127.0.0.1:8443"</span>
+<a id=__codelineno-0-53 name=__codelineno-0-53 href=#__codelineno-0-53></a><span class=c1># - authenticated or production operation: "0.0.0.0:8443" (unless explicitly configured)</span>
 <a id=__codelineno-0-54 name=__codelineno-0-54 href=#__codelineno-0-54></a><span class=c1># Tokenless development mode only accepts loopback addresses (e.g., 127.0.0.1:8443, localhost:8443, [::1]:8443).</span>
 <a id=__codelineno-0-55 name=__codelineno-0-55 href=#__codelineno-0-55></a><span class=c1># Wildcard, LAN, public, and non-loopback hostname binds require CMCP_BEARER_TOKEN.</span>
-<a id=__codelineno-0-56 name=__codelineno-0-56 href=#__codelineno-0-56></a><span class=nt>listen_addr</span><span class=p>:</span><span class=w> </span><span class=s>&quot;0.0.0.0:8443&quot;</span>
+<a id=__codelineno-0-56 name=__codelineno-0-56 href=#__codelineno-0-56></a><span class=nt>listen_addr</span><span class=p>:</span><span class=w> </span><span class=s>"0.0.0.0:8443"</span>
 <a id=__codelineno-0-57 name=__codelineno-0-57 href=#__codelineno-0-57></a>
 <a id=__codelineno-0-58 name=__codelineno-0-58 href=#__codelineno-0-58></a><span class=c1># Maximum size of a tool response payload in bytes. Responses larger than</span>
 <a id=__codelineno-0-59 name=__codelineno-0-59 href=#__codelineno-0-59></a><span class=c1># this are rejected before entering the response inspector (FM-5 size check).</span>
