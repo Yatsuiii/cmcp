@@ -30,7 +30,6 @@ from starlette.routing import Route
 
 from cmcp_runtime.catalog.loader import ApprovedDefinition, CatalogEntry, ServerIdentity
 from cmcp_runtime.mcp.proxy import CMCPProxy
-from cmcp_runtime.mcp.streamable_http import PROTOCOL_VERSION
 
 if TYPE_CHECKING:
     from cmcp_runtime.audit.chain import AuditChain
@@ -41,6 +40,39 @@ logger = logging.getLogger(__name__)
 
 # Endpoints exempt from bearer-token auth (Kubernetes liveness / readiness probes)
 _AUTH_EXEMPT_PATHS = {"/health", "/readyz"}
+
+# Revisions the gateway can negotiate at `initialize`, newest first.
+#
+# `initialize` belongs to the handshake era only. `PROTOCOL_VERSION` (#509) is
+# the revision the gateway speaks *outbound* to upstream servers, and it is
+# 2026-07-28 - the revision that removed `initialize` altogether. It must never
+# be the answer to a handshake: it names a protocol in which this request does
+# not exist, and in which every subsequent request must carry `_meta` and the
+# mirrored `MCP-Protocol-Version` / `Mcp-Method` headers that a handshake-era
+# client has no way to send.
+#
+# `2025-11-25` is the newest revision that still defines `initialize`, so it
+# heads the list: a client offering the latest handshake revision must get it
+# echoed rather than be downgraded.
+_LEGACY_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
+
+
+def _negotiate_protocol_version(params: dict[str, Any]) -> str:
+    """Pick the revision to answer `initialize` with.
+
+    Per the lifecycle spec: if the server supports the requested version it MUST
+    respond with that same version, otherwise it MUST respond with another it
+    supports, which SHOULD be the latest. A client that does not support the
+    answer SHOULD disconnect, which is why a needless downgrade is not a
+    harmless one.
+
+    The gateway advertises `tools` only, so the revision affects transport
+    framing rather than the surface exposed here.
+    """
+    requested = params.get("protocolVersion")
+    if isinstance(requested, str) and requested in _LEGACY_PROTOCOL_VERSIONS:
+        return requested
+    return _LEGACY_PROTOCOL_VERSIONS[0]
 
 
 def _invalid_request(rpc_id: Any = None) -> JSONResponse:
@@ -307,11 +339,18 @@ class MCPServer:
         if method == "tools/list":
             return await self._handle_tools_list(rpc_id)
         if method == "initialize":
+            # `InitializeRequestParams` is an object. Treating a non-object as
+            # an empty one would answer a malformed handshake with a successful
+            # negotiation, so it is rejected the same way `tools/call` rejects
+            # its own non-object params. Absent `params` stays legal and
+            # negotiates the newest revision.
+            if not isinstance(params, dict):
+                return _invalid_request(rpc_id)
             return JSONResponse({
                 "jsonrpc": "2.0",
                 "id": rpc_id,
                 "result": {
-                    "protocolVersion": PROTOCOL_VERSION,
+                    "protocolVersion": _negotiate_protocol_version(params),
                     "capabilities": {"tools": {}},
                     "serverInfo": {"name": "cmcp-runtime", "version": "0.1.0"},
                 },
