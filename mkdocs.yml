@@ -28,6 +28,7 @@ exclude_docs: |
 theme:
   name: material
   custom_dir: overrides
+  font: false
   logo: assets/icon.svg
   favicon: assets/icon.svg
   palette:
@@ -59,9 +60,6 @@ theme:
     - header.autohide
   icon:
     repo: fontawesome/brands/github
-  font:
-    text: Inter, system-ui, -apple-system, sans-serif
-    code: JetBrains Mono, Cascadia Code, monospace
 
 plugins:
   - search
@@ -147,6 +145,7 @@ extra:
 
 extra_css:
   - stylesheets/extra.css
+  - https://agentrust-io.com/design-system.css
 
 nav:
   - Home: README.md
