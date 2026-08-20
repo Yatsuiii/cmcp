@@ -1,0 +1,227 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://cmcp.agentrust-io.com/schemas/catalog-entry.schema.json",
+  "title": "cMCP Catalog Entry",
+  "description": "A single entry in the cMCP Gateway approved tool catalog, representing one tool from one MCP server.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "tool_name",
+    "server",
+    "approved_definition",
+    "definition_hash",
+    "added_at",
+    "approved_by"
+  ],
+  "properties": {
+    "tool_name": {
+      "type": "string",
+      "description": "The name the agent uses to invoke this tool, e.g. salesforce.query."
+    },
+    "server": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "display_name",
+        "transport"
+      ],
+      "properties": {
+        "display_name": {
+          "type": "string",
+          "description": "Human-readable name for the MCP server."
+        },
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Base URL of the MCP server endpoint."
+        },
+        "tls_fingerprint": {
+          "type": "string",
+          "pattern": "^SHA256:[A-Za-z0-9+/=]{43,44}$",
+          "description": "Colon-separated SHA-256 TLS certificate fingerprint in OpenSSL format."
+        },
+        "spiffe_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^spiffe://",
+          "description": "SPIFFE SVID for this server; required when SPIFFE is deployed, null otherwise."
+        },
+        "transport": {
+          "type": "string",
+          "enum": [
+            "http-sse",
+            "streamable-http",
+            "stdio"
+          ],
+          "description": "Transport protocol. stdio means the gateway spawns the server as its own child inside the enclave; see docs/spec/stdio-transport.md."
+        },
+        "spawn": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "command"
+          ],
+          "description": "How to start a stdio server. Required when transport is stdio, ignored otherwise.",
+          "properties": {
+            "command": {
+              "type": "string",
+              "description": "Executable to run."
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Arguments."
+            },
+            "binary_digest": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "description": "Expected digest of measure_target. Absent means the server is not pinned, which requires attestation.allow_unmeasured_spawn and is recorded as spawn-unmeasured."
+            },
+            "measure_target": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "File the digest covers; defaults to the resolved executable. Set this to the entrypoint for interpreted servers, where the executable is the interpreter and every server on the host would otherwise share one digest."
+            }
+          }
+        },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "record_path",
+            "publisher_jwk"
+          ],
+          "description": "Server provenance record for this server (spec/server-provenance-v1.md in agentrust-io/trace-spec). Optional: absence is recorded as 'absent' rather than failing, since almost no MCP server has a record today.",
+          "properties": {
+            "record_path": {
+              "type": "string",
+              "description": "Path to the signed provenance record (JSON)."
+            },
+            "publisher_jwk": {
+              "type": "object",
+              "description": "Public key the record must verify under. Required: the key embedded in a record cannot be used to check that record, because a forgery supplies its own."
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "$comment": "A network transport needs an endpoint and a pin; stdio has neither.",
+          "if": {
+            "properties": {
+              "transport": {
+                "enum": [
+                  "http-sse",
+                  "streamable-http"
+                ]
+              }
+            },
+            "required": [
+              "transport"
+            ]
+          },
+          "then": {
+            "required": [
+              "url",
+              "tls_fingerprint"
+            ]
+          }
+        },
+        {
+          "$comment": "A stdio server needs to say what the gateway should spawn.",
+          "if": {
+            "properties": {
+              "transport": {
+                "const": "stdio"
+              }
+            },
+            "required": [
+              "transport"
+            ]
+          },
+          "then": {
+            "required": [
+              "spawn"
+            ]
+          }
+        }
+      ]
+    },
+    "approved_definition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "description",
+        "input_schema"
+      ],
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "The tool description text as shown in the catalog."
+        },
+        "input_schema": {
+          "type": "object",
+          "description": "JSON Schema describing the tool input parameters."
+        },
+        "output_schema": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "JSON Schema describing the tool output; null if not specified."
+        }
+      }
+    },
+    "definition_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "SHA-256 of the canonical JSON of approved_definition; used for drift detection."
+    },
+    "compliance_domain": {
+      "type": "string",
+      "enum": [
+        "hipaa_phi",
+        "pci_data",
+        "mnpi",
+        "pii",
+        "internal",
+        "external",
+        "public"
+      ],
+      "description": "Compliance classification domain for this tool."
+    },
+    "requires_baa": {
+      "type": "boolean",
+      "default": false,
+      "description": "True if a Business Associate Agreement is required to invoke this tool."
+    },
+    "sensitivity_level": {
+      "type": "string",
+      "default": "public",
+      "description": "Data sensitivity level of information this tool accesses or returns. Validated at catalog load time against the built in vocabulary plus any deployment configured additions (#479), not enumerated here, since the legal set is config dependent."
+    },
+    "added_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp at which this entry was added to the catalog."
+    },
+    "approved_by": {
+      "type": "string",
+      "description": "Identity of the person or system that approved this catalog entry."
+    },
+    "catalog_exception": {
+      "type": "boolean",
+      "default": false,
+      "description": "True if this entry was added via the break-glass exception procedure."
+    }
+  }
+}

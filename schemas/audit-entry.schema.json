@@ -1,0 +1,185 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://cmcp.agentrust-io.com/schemas/audit-entry.schema.json",
+  "title": "cMCP Audit Chain Entry",
+  "description": "A single entry in the append-only audit chain maintained inside the cMCP Gateway TEE.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "entry_id",
+    "sequence_number",
+    "timestamp_utc",
+    "session_id",
+    "call_id",
+    "entry_type",
+    "tool_name",
+    "server_identity",
+    "policy_decision",
+    "policy_rule_matched",
+    "latency_us",
+    "request_payload_hash",
+    "response_payload_hash",
+    "response_inspection_result",
+    "session_sensitivity_before",
+    "session_sensitivity_after",
+    "prev_entry_hash",
+    "entry_hash"
+  ],
+  "properties": {
+    "entry_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this audit chain entry."
+    },
+    "sequence_number": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonically increasing sequence number within the session."
+    },
+    "timestamp_utc": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp at which this entry was recorded."
+    },
+    "session_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Session to which this entry belongs."
+    },
+    "call_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for the tool call this entry records."
+    },
+    "entry_type": {
+      "type": "string",
+      "enum": [
+        "tool_call",
+        "session_start",
+        "session_end",
+        "session_reset",
+        "attestation_refresh",
+        "policy_load",
+        "catalog_load",
+        "fault"
+      ],
+      "description": "Type of event recorded by this entry."
+    },
+    "tool_name": {
+      "type": ["string", "null"],
+      "description": "Name of the tool invoked; null for non-tool-call entry types."
+    },
+    "server_identity": {
+      "type": ["string", "null"],
+      "description": "Identity of the MCP server involved; null when not applicable."
+    },
+    "policy_decision": {
+      "type": ["string", "null"],
+      "enum": [
+        "allow",
+        "deny",
+        "redact",
+        "advisory_deny",
+        "step_up",
+        "defer",
+        "fault",
+        "n/a",
+        null
+      ],
+      "description": "Cedar policy decision for this entry; null for non-evaluated entry types. step_up and defer are the AARM R4 decision types with no older cMCP equivalent, and redact carries AARM MODIFY; see cmcp_runtime.policy.decisions for the crosswalk. Widening this enum is additive, so entries written before it still validate."
+    },
+    "policy_rule_matched": {
+      "type": ["string", "null"],
+      "description": "Cedar rule ID or name that produced the policy decision; null if no rule matched or not applicable."
+    },
+    "latency_us": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "End-to-end latency in microseconds for this tool call; null for non-call entries."
+    },
+    "request_payload_hash": {
+      "type": ["string", "null"],
+      "description": "SHA-256 of the canonical request payload; NOT the payload itself. Null when not applicable."
+    },
+    "response_payload_hash": {
+      "type": ["string", "null"],
+      "description": "SHA-256 of the canonical response payload. Null when not applicable."
+    },
+    "response_inspection_result": {
+      "type": ["string", "null"],
+      "enum": [
+        "pass",
+        "injection_detected",
+        "schema_violation",
+        "surplus_stripped",
+        "size_exceeded",
+        "n/a",
+        null
+      ],
+      "description": "Result of response inspection by the gateway; null for non-tool-call entries."
+    },
+    "external_execution_evidence": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "description": "Optional independent execution evidence bound to this call (issue #301). Distinct from response_payload_hash: response_payload_hash is what the gateway forwarded, this is what an independent authority (e.g. a safety controller) attested. Null when absent. Intentionally not in 'required' so entries that predate the field still validate.",
+      "required": [
+        "issuer",
+        "issuer_key_id",
+        "signature",
+        "evidence_hash",
+        "evidence_type",
+        "linked_call_id"
+      ],
+      "properties": {
+        "issuer": {
+          "type": "string",
+          "description": "Identity (e.g. SPIFFE URI) of the authority that signed the receipt."
+        },
+        "issuer_key_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Lowercase hex SHA-256 digest of the raw Ed25519 issuer public key used to verify the signature."
+        },
+        "signature": {
+          "type": "string",
+          "description": "base64url Ed25519 signature over the canonical receipt (all fields except signature)."
+        },
+        "evidence_hash": {
+          "type": "string",
+          "pattern": "^sha(256|384):[0-9a-f]+",
+          "description": "sha256:<hex> of the attested execution evidence (e.g. the controller decision payload)."
+        },
+        "evidence_type": {
+          "type": "string",
+          "enum": [
+            "controller-execution-receipt/v1",
+            "tee-signed-receipt",
+            "controller-jwt",
+            "opaque-receipt"
+          ],
+          "description": "Receipt type and version, e.g. controller-execution-receipt/v1."
+        },
+        "linked_call_id": {
+          "type": "string",
+          "description": "The call_id this receipt is bound to; a verifier checks it equals the entry call_id."
+        }
+      }
+    },
+    "session_sensitivity_before": {
+      "type": ["string", "null"],
+      "description": "Session sensitivity level before this entry was processed."
+    },
+    "session_sensitivity_after": {
+      "type": ["string", "null"],
+      "description": "Session sensitivity level after this entry was processed."
+    },
+    "prev_entry_hash": {
+      "type": "string",
+      "description": "SHA-256 hex of the previous entry in the chain; the literal string 'genesis' for the first entry."
+    },
+    "entry_hash": {
+      "type": "string",
+      "description": "SHA-256 hex of this entry's canonical JSON, excluding the entry_hash field itself."
+    }
+  }
+}
