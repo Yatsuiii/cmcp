@@ -1,7 +1,7 @@
 # Hardware validation
 
 What has been verified against real confidential-computing hardware, what has
-not, and how to reproduce each run. [STATUS.md](../../STATUS.md) links here
+not, and how to reproduce each run. [STATUS.md](https://github.com/agentrust-io/cmcp/blob/main/STATUS.md) links here
 rather than restating it.
 
 The rule this page exists to enforce: no document describes cMCP as
@@ -28,7 +28,7 @@ Verification is bounded to a remote or rogue-admin adversary. It does not hold
 against an adversary with physical access to the hardware:
 [TEE.fail](https://tee.fail) demonstrates attestation-key extraction from
 fully-patched SEV-SNP and TDX with a sub-$1000 DDR5 interposer. See
-[LIMITATIONS.md](../../LIMITATIONS.md).
+[LIMITATIONS.md](https://github.com/agentrust-io/cmcp/blob/main/LIMITATIONS.md).
 
 ## SEV-SNP, Azure confidential VM
 

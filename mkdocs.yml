@@ -144,7 +144,9 @@ extra:
   generator: false
 
 extra_css:
-  - stylesheets/extra.css
+  # Shared AgenTrust editorial design system. Deliberately the only stylesheet:
+  # a local override here is how this site drifted to the Material default
+  # violet last time. Change the shared file instead.
   - https://agentrust-io.com/design-system.css
 
 nav:
@@ -153,6 +155,7 @@ nav:
   - How It Works: concepts.md
   - Configuration: configuration.md
   - Tutorials:
+      - Try it from an existing MCP client: tutorials/existing-mcp-clients.md
       - Connecting agent frameworks: tutorials/connecting-agent-frameworks.md
       - Tool catalog authoring: tutorials/tool-catalog-authoring.md
       - Cedar policy walkthrough: tutorials/cedar-policy-walkthrough.md
@@ -171,8 +174,11 @@ nav:
       - Cedar Policy: spec/cedar-policy.md
       - Attestation: spec/attestation.md
       - Transport: spec/transport.md
+      - stdio Transport: spec/stdio-transport.md
       - Session Policy: spec/session-policy.md
       - Tool Identity: spec/tool-identity.md
+      - Catalog Lifecycle: spec/catalog-lifecycle.md
+      - Catalog Approval Provenance: spec/catalog-approval-provenance.md
       - Response Inspection: spec/response-inspection.md
       - Call Graph: spec/call-graph.md
       - Proxy Security: spec/proxy-security.md
@@ -181,11 +187,13 @@ nav:
       - Error Codes: spec/error-codes.md
       - Failure Modes: spec/failure-modes.md
       - Threat Model: spec/threat-model.md
+      - TPM Security Model: spec/tpm-security-model.md
       - Policy Hot-Reload: spec/policy-hot-reload.md
       - Phase 2 Server: spec/phase2-server.md
   - Testing:
       - Benchmarks: testing/benchmarks.md
       - Soak Test: testing/soak-test.md
+      - Hardware Validation: testing/hardware-validation.md
   - Project:
       - Limitations: https://github.com/agentrust-io/cmcp/blob/main/LIMITATIONS.md
       - Changelog: https://github.com/agentrust-io/cmcp/blob/main/CHANGELOG.md
