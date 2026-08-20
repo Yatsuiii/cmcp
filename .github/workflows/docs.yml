@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "docs/**"
+      - "schemas/**"
       - "mkdocs.yml"
       - "requirements-docs.txt"
       - "README.md"
@@ -47,6 +48,25 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # Every schema declares $id https://cmcp.agentrust-io.com/schemas/<file>,
+      # which is the URL an implementation fetches. They live at the repository
+      # root, outside docs_dir, so the site never served them and each $id
+      # returned 404. Stage them into the build instead of committing a second
+      # copy, so the files under schemas/ stay the only source and cannot drift.
+      - name: Stage the published schemas into the docs tree
+        run: |
+          set -euo pipefail
+          mkdir -p docs/schemas
+          cp schemas/*.json docs/schemas/
+          for f in docs/schemas/*.json; do
+            want="https://cmcp.agentrust-io.com/schemas/$(basename "$f")"
+            got=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['\$id'])" "$f")
+            if [ "$got" != "$want" ]; then
+              echo "::error::$f declares \$id '$got' but is served at '$want'"
+              exit 1
+            fi
+          done
 
       - name: Build and deploy to GitHub Pages
         run: mkdocs gh-deploy --force --clean

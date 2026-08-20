@@ -20,3 +20,6 @@ coverage.xml
 # Runtime artifacts
 *.db
 audit.db
+
+# staged at build time from schemas/ (see .github/workflows/docs.yml)
+docs/schemas/
