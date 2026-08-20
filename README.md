@@ -294,7 +294,7 @@ MIT.
 
 ## Contributing
 
-[CONTRIBUTING.md](CONTRIBUTING.md) · [GOVERNANCE.md](GOVERNANCE.md) · [Discussions](https://github.com/agentrust-io/cmcp/discussions)
+[CONTRIBUTING.md](CONTRIBUTING.md) · [GOVERNANCE.md](GOVERNANCE.md) · [Discussions](https://github.com/orgs/agentrust-io/discussions)
 
 Join the community on [Discord](https://discord.gg/grgzFEHgkj).
 
