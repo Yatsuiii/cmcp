@@ -6,127 +6,70 @@ cMCP (Confidential MCP Runtime) is the secure, confidential way to run MCP: an o
 
 # Getting started
 
-# cMCP Spec
+# cMCP
 
-cMCP Runtime is a hardware-attested MCP (Model Context Protocol) runtime. Every MCP tool call an agent makes passes through a TEE-isolated gateway that evaluates it against a Cedar policy bundle and produces a TRACE Claim: a signed, hardware-attested proof artifact a verifier can check without trusting the operator.
+cMCP (Confidential MCP) is a hardware-attested runtime for the Model Context Protocol. Every MCP tool call an agent makes passes through a TEE-isolated gateway that evaluates it against a Cedar policy bundle and produces a TRACE claim: a signed, hardware-attested artifact a verifier can check without trusting the operator.
 
-Phase 1 attests the agent-to-tool boundary on the consumer side (the runtime). Phase 2 attests it on the provider side (the server). Together they close the proof gap that software-only runtimes leave open: "prove that the policy you describe in documents is the policy that actually ran on your traffic."
+**Prove that the policy you describe in documents is the policy that actually ran on your traffic.**
 
-This repository contains the product specification. Implementation lives in a separate repo.
+TL;DR
 
-______________________________________________________________________
-
-## Start here
-
-**Understanding the problem space:** Read SPEC.md. It defines the four problems (P1 data leakage, P2 unsanctioned tools, P3 provable governance, P4 supply chain), the 13 threat shapes, and the coverage matrix showing what Phase 1 closes vs. what Phase 2 closes.
-
-**Implementing the runtime (Phase 1):** Read in this order:
-
-1. SPEC.md : problem context and scope
-1. docs/spec/component-model.md : what you are building and where trust boundaries are
-1. docs/spec/transport.md : how the runtime intercepts MCP traffic
-1. docs/spec/attestation.md : how TEE attestation works and how to produce TRACE Claims
-1. docs/spec/cedar-policy.md : the policy engine, bundle format, and enforcement modes
-1. docs/spec/failure-modes.md : what happens when things go wrong
-1. schemas/ : machine-readable schemas to validate your outputs against
-
-**Contributing to the spec:** Issues in this repo track spec decisions, not implementation bugs. Each issue corresponds to a specific design question. When a spec file resolves an issue, the issue is closed with a reference to the relevant file. To propose a change, open an issue describing the problem with the current spec, then submit a PR.
-
-______________________________________________________________________
-
-## Spec File Index
-
-| File                              | Covers                                                                        | Phase | Status     | Issues                  |
-| --------------------------------- | ----------------------------------------------------------------------------- | ----- | ---------- | ----------------------- |
-| docs/SPEC.md                      | Problem taxonomy, coverage matrix, Phase 1/2 scope                            | 1+2   | Draft v0.1 | -                       |
-| docs/spec/component-model.md      | All MCP components, trust levels, hardware vs. software boundaries            | 1+2   | Draft v0.1 | #43                     |
-| docs/spec/transport.md            | HTTP/SSE scope, stdio gap, SPIFFE-to-TEE binding spike                        | 1     | Draft v0.1 | #20, #21                |
-| docs/spec/attestation.md          | TEE provider detection, audit chain, key management, catalog pinning          | 1     | Draft v0.1 | #5, #6, #23, #33, #38   |
-| docs/spec/cedar-policy.md         | Policy bundle format, Cedar examples, enforcement modes, provenance           | 1     | Draft v0.1 | #4, #7, #26, #39, #41   |
-| docs/spec/tool-identity.md        | Server identity binding, catalog schema, collision detection                  | 1     | Draft v0.1 | #40                     |
-| docs/spec/failure-modes.md        | Runtime failure scenarios, decision table, log formats                        | 1     | Draft v0.1 | #22                     |
-| docs/spec/call-graph.md           | Tag-propagation model, observability limits, cross-boundary policy            | 1     | Draft v0.1 | #35                     |
-| docs/spec/session-policy.md       | Session sensitivity state machine, egress policy, session reset               | 1     | Draft v0.1 | #36                     |
-| docs/spec/response-inspection.md  | 4-stage response inspection pipeline, injection patterns                      | 1     | Draft v0.1 | #37                     |
-| docs/spec/error-codes.md          | Central error code registry for all runtime and verification errors           | 1+2   | Draft v0.1 | -                       |
-| docs/spec/threat-model.md         | Assets, adversaries, STRIDE analysis per component                            | 1     | Draft v0.1 | #18, #24                |
-| docs/spec/verification-library.md | cmcp-verify Python library interface and per-provider verification steps      | 1     | Draft v0.1 | #25                     |
-| docs/spec/mcp-spec-strategy.md    | MCP spec monitoring and attestation extension contribution window             | 1+2   | Draft v0.1 | #30                     |
-| docs/spec/proxy-security.md       | Phase 2 proxy parser fuzzing DoD                                              | 2     | Draft v0.1 | #34                     |
-| docs/spec/phase2-server.md        | Provider-side attestation, 5 unique properties, streaming proxy, multi-tenant | 2     | Draft v0.1 | #17, #28, #29, #32, #42 |
-| docs/testing/benchmarks.md        | Latency targets and benchmark methodology                                     | 1     | Draft v0.1 | #27                     |
-| docs/testing/soak-test.md         | 72-hour soak test plan                                                        | 1     | Draft v0.1 | #31                     |
-
-______________________________________________________________________
-
-## Schema Files
-
-Machine-readable schemas in `schemas/` let implementations validate their outputs before shipping.
-
-| File                              | What it validates                         | Use with                                   |
-| --------------------------------- | ----------------------------------------- | ------------------------------------------ |
-| schemas/trace-claim.schema.json   | TRACE Claim JSON (draft-07)               | jsonschema, ajv, any JSON Schema validator |
-| schemas/audit-entry.schema.json   | Single audit chain entry                  | jsonschema, ajv                            |
-| schemas/catalog-entry.schema.json | Tool catalog entry                        | jsonschema, ajv                            |
-| schemas/cedar-schema.cedarschema  | Cedar entity types and context attributes | cedar-policy CLI: `cedar validate`         |
-
-To validate a TRACE Claim:
+- MCP authenticates the caller. It does not constrain what a tool call may do, and it leaves no evidence of what it did.
+- cMCP runs the tool call inside a TEE, decides it against Cedar, and emits a signed receipt for every call.
+- Install with `pip install cmcp-runtime`, or follow the [guided quickstart](https://agentrust-io.com/quickstart/) and watch a policy block a real data leak in about ten minutes.
+- Two bounds worth stating up front: the plaintext guarantee holds where the egress policy denies telemetry and APM endpoints, and the receipt is hardware-attested when the gateway runs in a TEE and signed-only in software mode.
 
 ```
-ajv validate -s schemas/trace-claim.schema.json -d your-trace-claim.json
+pip install cmcp-runtime
 ```
 
-To validate Cedar policies:
+## The gap it closes
 
-```
-cedar validate --schema schemas/cedar-schema.cedarschema --policies policies/
-```
+An agent calling a tool over MCP presents a token. The token says who is calling. It does not say what the call is allowed to touch, and once the call returns there is no artifact proving what actually happened.
 
-______________________________________________________________________
+Software-only enforcement does not close this. A privileged operator can change a policy between the approval that was reviewed and the traffic that ran, and then write the log that describes it. The log is authored by the system being audited.
 
-## Conformance Tests
+cMCP moves the decision and the evidence inside a TEE. The policy bundle is measured, the decision happens where the operator cannot reach it, and the receipt is signed by a key that never leaves the enclave. Phase 1 attests the agent-to-tool boundary on the consumer side, in the runtime. Phase 2 attests it on the provider side, in the server.
 
-`tests/conformance/README.md` defines the conformance test suite: 22 test cases across 6 groups (ATTEST, POLICY, AUDIT, FAIL, INSP, TRACE). Each case specifies:
+## Where to start
 
-- Input conditions
-- Expected behavior (pass/fail, error code, field values)
-- The spec section it validates
+- **Run it**
 
-A conforming implementation passes all MUST-level tests. SHOULD-level tests indicate higher-quality conformance.
+  ______________________________________________________________________
 
-______________________________________________________________________
+  Write one policy, watch it block a tool call, and verify the receipt it produced.
 
-## Contributing
+  [Quick Start](https://cmcp.agentrust-io.com/quickstart/index.md)
 
-**Spec versioning:** All files use `Status: Draft/Review/Accepted/Superseded` plus a version number (e.g. `v0.1`). Stability is `Unstable` until v1.0.
+- **Understand it**
 
-**Process:**
+  ______________________________________________________________________
 
-1. Open an issue describing the spec gap or design question
-1. Discuss in the issue : the issue body captures the decision context
-1. Submit a PR with the spec change, referencing the issue
-1. PR is merged when the spec change is accepted
+  The component model, trust boundaries, and how a tool call becomes a signed claim.
 
-**Scope:** This repo is spec-only. Implementation bugs go in the implementation repo (link TBD). Spec issues are about design decisions, not code behavior.
+  [How It Works](https://cmcp.agentrust-io.com/concepts/index.md)
 
-______________________________________________________________________
+- **Read the spec**
 
-## Glossary
+  ______________________________________________________________________
 
-| Term                | Definition                                                                                         |
-| ------------------- | -------------------------------------------------------------------------------------------------- |
-| TRACE Claim         | The signed, hardware-attested proof artifact produced by the runtime per session                   |
-| TEE                 | Trusted Execution Environment (TPM, SEV-SNP, TDX, or OPAQUE Managed)                               |
-| SPIFFE SVID         | Short-lived cryptographic identity issued by SPIRE after TEE attestation succeeds                  |
-| Cedar               | The policy language used for tool call authorization                                               |
-| Audit chain         | The append-only hash-chained log of all runtime decisions, signed with a TEE-sealed key            |
-| Session sensitivity | The maximum sensitivity level seen in any tool response within the current session                 |
-| Tag-propagation     | The runtime's mechanism for tracking sensitivity across calls based on observable events           |
-| Catalog entry       | The runtime's approved record for one tool: name, server identity, approved definition             |
-| Attestation report  | The hardware-produced evidence that a specific binary ran in a specific TEE at a specific time     |
-| policy_bundle_hash  | SHA-256 of the canonical Cedar policy bundle, measured into the TEE at startup                     |
-| tool_catalog_hash   | SHA-256 of the canonical tool catalog, measured into the TEE at startup                            |
-| Call graph          | Per-session record of tool calls and temporal adjacency edges (approximation, not data provenance) |
+  Problem taxonomy, the thirteen threat shapes, and the Phase 1 and Phase 2 coverage matrix.
+
+  [SPEC.md](https://cmcp.agentrust-io.com/SPEC/index.md)
+
+- **Check the bounds**
+
+  ______________________________________________________________________
+
+  What is attested against real silicon, what is parsed, and what is not appraised at all.
+
+  [Limitations](https://github.com/agentrust-io/cmcp/blob/main/LIMITATIONS.md)
+
+## How it fits the rest of the stack
+
+cMCP is the enforcement layer of the AgenTrust chain. [Agent Manifest](https://manifest.agentrust-io.com) declares what an agent is and what it may do before it runs. cMCP enforces that at the tool-call boundary. [TRACE](https://trace.agentrust-io.com) is the evidence format the receipts are written in, and [cA2A](https://ca2a.agentrust-io.com) carries the same guarantees across agent-to-agent hops.
+
+Issues in this repository track specification decisions rather than implementation bugs. To propose a change, open an issue describing the problem with the current spec, then submit a pull request. See [Contributing](https://github.com/agentrust-io/cmcp/blob/main/CONTRIBUTING.md).
 
 # Quickstart - cMCP Runtime
 
