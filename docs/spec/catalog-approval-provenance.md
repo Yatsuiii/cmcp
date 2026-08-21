@@ -11,9 +11,33 @@ catalog hashes, a change-set digest, an automated-checks digest, and an
 approval policy. Every approval is an Ed25519 signature over the record body and
 its own principal, issuer, role, validity interval, and key identifier. The
 verifier resolves keys from trusted configuration; no record-embedded key can
-bootstrap trust. It rejects unknown fields, revoked or expired keys, invalid
-signatures, duplicate principals or roles when the policy requires distinctness,
-and records whose `new_catalog_hash` differs from the runtime catalog hash.
+bootstrap trust.
+
+The same rule applies to the policy. A record states which policy it followed,
+but the verifier is given the expected policy hash and catalog identifier from
+its own configuration, and rejects any record citing a different policy. The
+record's `policy_hash` must also cover its own policy body, computed over the
+policy object with the `policy_hash` field removed. Without this pinning a
+single reviewer key could issue a record declaring a threshold of one, so the
+M-of-N property depends on the policy being verifier-supplied rather than
+record-supplied.
+
+The verifier rejects unknown fields, revoked or expired keys, invalid
+signatures, repeated principals or roles when the policy requires distinctness,
+and records whose `new_catalog_hash` differs from the runtime catalog hash. A
+reviewer key counts once regardless of policy: a repeated signature is one
+approval presented N times, not N approvals, and without that rule a threshold
+of N is satisfiable by a single key whenever the policy does not demand
+distinct principals, or demands distinct roles while the key's trusted entry
+pins no role.
+The key identifier is the reviewer key's identity for both of those rules. A
+verifier that registers one key under two identifiers has neither: the record
+can present it twice toward one threshold, and revoking one identifier leaves
+the other usable. `trusted_reviewers` must therefore map distinct identifiers to
+distinct keys.
+`catalog_id` is always checked. `sequence`, `previous_record_hash`, and
+`previous_catalog_hash` are checked when the caller supplies the corresponding
+checkpoint, which it must obtain externally as described below.
 
 The signing input is RFC 8785 (JCS): UTF-8 output, object members ordered by
 their UTF-16 code units, and no escaping beyond what ECMAScript `JSON.stringify`
