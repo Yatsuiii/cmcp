@@ -474,6 +474,82 @@ def test_deny_response_does_not_include_internal_reason():
     assert body["error"]["message"] == "Request denied by policy"
 
 
+def test_upstream_error_deny_reason_returns_502():
+    proxy = MagicMock()
+    proxy._catalog = MagicMock()
+    proxy._catalog.entries = {}
+    proxy.call_tool = AsyncMock(return_value=MagicMock(
+        allowed=False,
+        deny_reason="upstream_error:CONNECTION_REFUSED",
+        audit_entry_hash=None,
+        would_have_denied=False,
+        latency_us=0,
+        advice=None,
+    ))
+    with patch("cmcp_runtime.mcp.server.StatelessKernel"):
+        server = MCPServer(proxy)
+    client = TestClient(server.app, raise_server_exceptions=False)
+    resp = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "t", "arguments": {}}, "id": 1},
+    )
+    assert resp.status_code == 502
+    body = resp.json()
+    assert body["error"]["message"] == "Upstream MCP server error"
+    assert body["error"]["data"]["error_code"] == "CONNECTION_REFUSED"
+
+
+@pytest.mark.parametrize("reason", ["attestation_stale", "catalog_drift"])
+def test_health_deny_reason_returns_503(reason):
+    proxy = MagicMock()
+    proxy._catalog = MagicMock()
+    proxy._catalog.entries = {}
+    proxy.call_tool = AsyncMock(return_value=MagicMock(
+        allowed=False,
+        deny_reason=reason,
+        audit_entry_hash=None,
+        would_have_denied=False,
+        latency_us=0,
+        advice=None,
+    ))
+    with patch("cmcp_runtime.mcp.server.StatelessKernel"):
+        server = MCPServer(proxy)
+    client = TestClient(server.app, raise_server_exceptions=False)
+    resp = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "t", "arguments": {}}, "id": 1},
+    )
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["error"]["message"] == reason
+    assert body["error"]["data"]["error_code"] == reason.upper()
+
+
+def test_deny_response_includes_advice_when_present():
+    """Advice annotations come from the operator-authored policy bundle, so
+    reflecting them (unlike deny_reason) does not violate INJECT-003."""
+    proxy = MagicMock()
+    proxy._catalog = MagicMock()
+    proxy._catalog.entries = {}
+    proxy.call_tool = AsyncMock(return_value=MagicMock(
+        allowed=False,
+        deny_reason="policy denied",
+        audit_entry_hash=None,
+        would_have_denied=False,
+        latency_us=0,
+        advice={"escalation": "HITL"},
+    ))
+    with patch("cmcp_runtime.mcp.server.StatelessKernel"):
+        server = MCPServer(proxy)
+    client = TestClient(server.app, raise_server_exceptions=False)
+    resp = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "t", "arguments": {}}, "id": 1},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["error"]["data"]["advice"] == {"escalation": "HITL"}
+
+
 # ── #518: strict jsonrpc/id validation, matching scripts/mock_upstream.py ────
 
 def test_missing_jsonrpc_field_returns_invalid_request():
@@ -566,6 +642,23 @@ def test_arguments_exceeding_depth_cap_returns_invalid_params():
             "jsonrpc": "2.0",
             "method": "tools/call",
             "params": {"name": "t", "arguments": {"nested": _nested(_MAX_ARG_DEPTH + 10)}},
+            "id": 1,
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == -32602
+
+
+def test_depth_cap_violation_inside_a_list_is_caught():
+    """The depth walk recurses into list items, not only dict values."""
+    server = _make_server()
+    client = TestClient(server.app, raise_server_exceptions=False)
+    resp = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "t", "arguments": {"items": [_nested(_MAX_ARG_DEPTH + 10)]}},
             "id": 1,
         },
     )
