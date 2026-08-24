@@ -15,6 +15,7 @@ import sys
 import threading
 from http.server import HTTPServer
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -286,3 +287,166 @@ def test_valid_request_is_not_logged(upstream, caplog):
     with caplog.at_level("WARNING", logger="mock_upstream"):
         _post(upstream, VALID_REQUEST)
     assert caplog.records == []
+
+
+# ---------------------------------------------------------------------------
+# Strict jsonrpc/id validation (#518)
+# ---------------------------------------------------------------------------
+
+
+def test_wrong_jsonrpc_version_returns_invalid_request(upstream):
+    req = json.dumps(
+        {"jsonrpc": "1.0", "id": 20, "method": "tools/call", "params": {"name": "echo"}}
+    ).encode()
+    status, body = _post(upstream, req)
+    assert status == 400
+    assert body["error"]["code"] == -32600
+    assert body["id"] == 20
+
+
+def test_missing_jsonrpc_returns_invalid_request(upstream):
+    req = json.dumps({"id": 21, "method": "tools/call", "params": {"name": "echo"}}).encode()
+    status, body = _post(upstream, req)
+    assert status == 400
+    assert body["error"]["code"] == -32600
+
+
+def test_object_id_returns_invalid_request_with_null_id(upstream):
+    req = json.dumps(
+        {"jsonrpc": "2.0", "id": {"nope": True}, "method": "tools/call", "params": {}}
+    ).encode()
+    status, body = _post(upstream, req)
+    assert status == 400
+    assert body["error"]["code"] == -32600
+    assert body["id"] is None
+
+
+def test_bool_id_returns_invalid_request_with_null_id(upstream):
+    req = json.dumps({"jsonrpc": "2.0", "id": True, "method": "tools/call", "params": {}}).encode()
+    status, body = _post(upstream, req)
+    assert status == 400
+    assert body["error"]["code"] == -32600
+    assert body["id"] is None
+
+
+def test_null_id_is_valid(upstream):
+    req = json.dumps(
+        {"jsonrpc": "2.0", "id": None, "method": "tools/call", "params": {"name": "echo"}}
+    ).encode()
+    status, body = _post(upstream, req)
+    assert status == 200
+    assert body["id"] is None
+
+
+def test_absent_id_is_valid(upstream):
+    req = json.dumps(
+        {"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "echo"}}
+    ).encode()
+    status, body = _post(upstream, req)
+    assert status == 200
+    assert body["id"] is None
+
+
+# ---------------------------------------------------------------------------
+# Argument depth/key-count caps (#518)
+# ---------------------------------------------------------------------------
+
+
+def _nested(depth: int) -> dict:
+    value: Any = "leaf"
+    for _ in range(depth):
+        value = {"child": value}
+    return value
+
+
+def test_arguments_within_depth_cap_are_accepted(upstream):
+    req = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 30,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": _nested(3)},
+        }
+    ).encode()
+    status, body = _post(upstream, req)
+    assert status == 200
+
+
+def test_arguments_past_depth_cap_returns_invalid_params(upstream):
+    req = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 31,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": _nested(25)},
+        }
+    ).encode()
+    status, body = _post(upstream, req)
+    assert status == 400
+    assert body["error"]["code"] == -32602
+    assert body["id"] == 31
+
+
+def test_arguments_past_key_count_cap_returns_invalid_params(upstream):
+    huge_flat = {f"k{i}": i for i in range(300)}
+    req = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 32,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": huge_flat},
+        }
+    ).encode()
+    status, body = _post(upstream, req)
+    assert status == 400
+    assert body["error"]["code"] == -32602
+    assert body["id"] == 32
+
+
+def test_arguments_within_key_count_cap_are_accepted(upstream):
+    small_flat = {f"k{i}": i for i in range(10)}
+    req = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 33,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": small_flat},
+        }
+    ).encode()
+    status, body = _post(upstream, req)
+    assert status == 200
+
+
+# ---------------------------------------------------------------------------
+# Non-standard JSON values (NaN, Infinity, -Infinity) (#518)
+# ---------------------------------------------------------------------------
+
+
+def test_nan_in_arguments_is_rejected(upstream):
+    body = (
+        b'{"jsonrpc": "2.0", "id": 40, "method": "tools/call", '
+        b'"params": {"name": "echo", "arguments": {"x": NaN}}}'
+    )
+    status, resp = _post(upstream, body)
+    assert status == 400
+    assert resp["error"]["code"] == -32700
+
+
+def test_infinity_in_arguments_is_rejected(upstream):
+    body = (
+        b'{"jsonrpc": "2.0", "id": 41, "method": "tools/call", '
+        b'"params": {"name": "echo", "arguments": {"x": Infinity}}}'
+    )
+    status, resp = _post(upstream, body)
+    assert status == 400
+    assert resp["error"]["code"] == -32700
+
+
+def test_negative_infinity_in_arguments_is_rejected(upstream):
+    body = (
+        b'{"jsonrpc": "2.0", "id": 42, "method": "tools/call", '
+        b'"params": {"name": "echo", "arguments": {"x": -Infinity}}}'
+    )
+    status, resp = _post(upstream, body)
+    assert status == 400
+    assert resp["error"]["code"] == -32700

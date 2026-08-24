@@ -32,7 +32,48 @@ MAX_REQUEST_BYTES = 1_000_000
 # to prevent -- past this ceiling we give up on a clean response and close.
 DRAIN_CEILING_BYTES = 10 * MAX_REQUEST_BYTES
 
+# #518: the byte cap above bounds total size, not shape. A payload well
+# under 1MB can still be expensive to walk -- deep nesting pushes toward
+# Python's recursion limit, and a flat object with thousands of short keys
+# costs little in bytes but is not free to iterate. These are judgment
+# calls, not values derived from an observed cMCP tool call: no real
+# `arguments` payload we ship examples for goes past 3-4 levels or a
+# handful of keys, so both caps sit an order of magnitude above that,
+# leaving room for a legitimate tool with a genuinely nested schema.
+_MAX_ARG_DEPTH = 20
+_MAX_ARG_KEYS = 256
+
 logger = logging.getLogger("mock_upstream")
+
+
+def _reject_nan_and_infinity(text: str) -> float:
+    raise ValueError(f"non-standard JSON value not allowed: {text}")
+
+
+def _valid_rpc_id(value: Any) -> bool:
+    # JSON-RPC 2.0 id must be a string, number, or null -- not a bool, even
+    # though bool is an int subclass in Python.
+    return value is None or (isinstance(value, (str, int, float)) and not isinstance(value, bool))
+
+
+def _arg_shape_violation(value: Any, *, depth: int = 0) -> str | None:
+    """Return a message describing the first depth/key-count violation found
+    under `value`, or None if it fits within `_MAX_ARG_DEPTH` / `_MAX_ARG_KEYS`."""
+    if depth > _MAX_ARG_DEPTH:
+        return f"arguments nested past the depth cap of {_MAX_ARG_DEPTH}"
+    if isinstance(value, dict):
+        if len(value) > _MAX_ARG_KEYS:
+            return f"object has more than {_MAX_ARG_KEYS} keys"
+        for child in value.values():
+            violation = _arg_shape_violation(child, depth=depth + 1)
+            if violation is not None:
+                return violation
+    elif isinstance(value, list):
+        for child in value:
+            violation = _arg_shape_violation(child, depth=depth + 1)
+            if violation is not None:
+                return violation
+    return None
 
 
 class MockMCPHandler(BaseHTTPRequestHandler):
@@ -85,7 +126,7 @@ class MockMCPHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length)
 
         try:
-            msg = json.loads(raw)
+            msg = json.loads(raw, parse_constant=_reject_nan_and_infinity)
         except (ValueError, TypeError):
             self._reject("parse_error", -32700, "Parse error", status=400)
             return
@@ -95,6 +136,14 @@ class MockMCPHandler(BaseHTTPRequestHandler):
             return
 
         rpc_id = msg.get("id")
+        if "id" in msg and not _valid_rpc_id(rpc_id):
+            self._reject("invalid_request", -32600, "Invalid Request", status=400)
+            return
+
+        if msg.get("jsonrpc") != "2.0":
+            self._reject("invalid_request", -32600, "Invalid Request", status=400, rpc_id=rpc_id)
+            return
+
         method = msg.get("method", "")
         if not isinstance(method, str) or not method:
             self._reject("invalid_request", -32600, "Invalid Request", status=400, rpc_id=rpc_id)
@@ -105,6 +154,9 @@ class MockMCPHandler(BaseHTTPRequestHandler):
             self._reject("invalid_request", -32600, "Invalid Request", status=400, rpc_id=rpc_id)
             return
 
+        self._handle_tool_call(rpc_id, params)
+
+    def _handle_tool_call(self, rpc_id: Any, params: dict[str, Any]) -> None:
         tool_name = params.get("name")
         if not isinstance(tool_name, str) or not tool_name:
             self._reject(
@@ -117,6 +169,14 @@ class MockMCPHandler(BaseHTTPRequestHandler):
         if not isinstance(arguments, dict):
             self._reject(
                 "invalid_params", -32602, "Invalid params: 'arguments' must be an object",
+                status=400, rpc_id=rpc_id,
+            )
+            return
+
+        violation = _arg_shape_violation(arguments)
+        if violation is not None:
+            self._reject(
+                "invalid_params", -32602, f"Invalid params: {violation}",
                 status=400, rpc_id=rpc_id,
             )
             return
