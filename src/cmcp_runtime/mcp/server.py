@@ -41,6 +41,47 @@ logger = logging.getLogger(__name__)
 # Endpoints exempt from bearer-token auth (Kubernetes liveness / readiness probes)
 _AUTH_EXEMPT_PATHS = {"/health", "/readyz"}
 
+# #518: DOS-001's byte cap bounds total size, not shape. A payload well under
+# the limit can still push toward Python's recursion limit through deep
+# nesting, or cost real time to iterate through a flat object with thousands
+# of short keys. These values mirror `_MAX_ARG_DEPTH` / `_MAX_ARG_KEYS` in
+# scripts/mock_upstream.py - same judgment call, same margin above any real
+# `arguments` payload this repo ships examples for, kept in sync rather than
+# unified per qubeena07's review on #518.
+_MAX_ARG_DEPTH = 20
+_MAX_ARG_KEYS = 256
+
+
+def _reject_nan_and_infinity(text: str) -> float:
+    raise ValueError(f"non-standard JSON value not allowed: {text}")
+
+
+def _valid_rpc_id(value: Any) -> bool:
+    # JSON-RPC 2.0 id must be a string, number, or null -- not a bool, even
+    # though bool is an int subclass in Python.
+    return value is None or (isinstance(value, (str, int, float)) and not isinstance(value, bool))
+
+
+def _arg_shape_violation(value: Any, *, depth: int = 0) -> str | None:
+    """Return a message describing the first depth/key-count violation found
+    under `value`, or None if it fits within `_MAX_ARG_DEPTH` / `_MAX_ARG_KEYS`."""
+    if depth > _MAX_ARG_DEPTH:
+        return f"arguments nested past the depth cap of {_MAX_ARG_DEPTH}"
+    if isinstance(value, dict):
+        if len(value) > _MAX_ARG_KEYS:
+            return f"object has more than {_MAX_ARG_KEYS} keys"
+        for child in value.values():
+            violation = _arg_shape_violation(child, depth=depth + 1)
+            if violation is not None:
+                return violation
+    elif isinstance(value, list):
+        for child in value:
+            violation = _arg_shape_violation(child, depth=depth + 1)
+            if violation is not None:
+                return violation
+    return None
+
+
 # Revisions the gateway can negotiate at `initialize`, newest first.
 #
 # `initialize` belongs to the handshake era only. `PROTOCOL_VERSION` (#509) is
@@ -271,8 +312,12 @@ class MCPServer:
             exception_handlers={Exception: _unhandled_error_handler},
         )
 
-    async def _handle_mcp(self, request: Request) -> Response:
-        """Handle MCP JSON-RPC 2.0 calls."""
+    async def _parse_mcp_envelope(self, request: Request) -> dict[str, Any] | Response:
+        """Read, size-check, and parse the request body.
+
+        Returns the parsed JSON-RPC message dict, or an error Response if the
+        body is oversized, unparsable, or not a JSON object.
+        """
         # DOS-001: reject oversized requests before parsing to prevent OOM
         content_length = request.headers.get("content-length")
         if content_length:
@@ -300,8 +345,10 @@ class MCPServer:
                     },
                     status_code=413,
                 )
-            msg = json.loads(body)
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            # #518: parse_constant intercepts NaN/Infinity/-Infinity before
+            # json.loads would otherwise accept them silently.
+            msg = json.loads(body, parse_constant=_reject_nan_and_infinity)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
             import hashlib
             payload_hash = f"sha256:{hashlib.sha256(body).hexdigest()}"
             logger.warning(
@@ -325,8 +372,22 @@ class MCPServer:
 
         if not isinstance(msg, dict):
             return _invalid_request()
+        return msg
 
+    async def _handle_mcp(self, request: Request) -> Response:
+        """Handle MCP JSON-RPC 2.0 calls."""
+        parsed = await self._parse_mcp_envelope(request)
+        if isinstance(parsed, Response):
+            return parsed
+        msg = parsed
+
+        # #518: strict jsonrpc/id validation, matching scripts/mock_upstream.py.
         rpc_id = msg.get("id")
+        if "id" in msg and not _valid_rpc_id(rpc_id):
+            return _invalid_request()
+        if msg.get("jsonrpc") != "2.0":
+            return _invalid_request(rpc_id)
+
         method = msg.get("method", "")
         if not isinstance(method, str):
             return _invalid_request(rpc_id)
@@ -369,12 +430,94 @@ class MCPServer:
             status_code=404,
         )
 
+    def _deny_response(self, rpc_id: Any, call_id: str, result: Any) -> JSONResponse:
+        """Build the JSON-RPC error response for a policy-denied tool call."""
+        deny_reason = result.deny_reason or ""
+        # Upstream transport/tool failure is a 502, not a policy deny.
+        if deny_reason.startswith("upstream_error:"):
+            return JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "error": {
+                        "code": -32000,
+                        "message": "Upstream MCP server error",
+                        "data": {
+                            "error_code": deny_reason.removeprefix("upstream_error:"),
+                            "call_id": call_id,
+                        },
+                    },
+                    "id": rpc_id,
+                },
+                status_code=502,
+            )
+        _HEALTH_REASONS = {"attestation_stale", "catalog_drift"}
+        if result.deny_reason in _HEALTH_REASONS:
+            return JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "error": {
+                        "code": -32000,
+                        "message": result.deny_reason,
+                        "data": {
+                            "error_code": result.deny_reason.upper(),
+                            "call_id": call_id,
+                        },
+                    },
+                    "id": rpc_id,
+                },
+                status_code=503,
+            )
+        # INJECT-003: log deny_reason internally; do not reflect internal detail to caller
+        error_code = (
+            "TOOL_NOT_IN_CATALOG"
+            if "catalog" in (result.deny_reason or "")
+            else "POLICY_DENY"
+        )
+        logger.info(
+            "POLICY_DENY: call_id=%s error_code=%s reason=%s",
+            call_id, error_code, result.deny_reason,
+        )
+        error_data: dict[str, Any] = {
+            "error_code": error_code,
+            "call_id": call_id,
+        }
+        # Advice annotations come from the hash-pinned policy bundle
+        # (operator-authored, not caller input), so reflecting them does
+        # not violate INJECT-003. They carry e.g. HITL escalation payloads.
+        if result.advice:
+            error_data["advice"] = result.advice
+        return JSONResponse(
+            {
+                "jsonrpc": "2.0",
+                "error": {
+                    "code": -32000,
+                    "message": "Request denied by policy",
+                    "data": error_data,
+                },
+                "id": rpc_id,
+            },
+            status_code=403,
+        )
+
     async def _handle_tool_call(self, rpc_id: Any, params: dict[str, Any]) -> Response:
         """Route a tools/call request through the proxy."""
         # POLICY-002: canonicalize tool names at ingress so Cedar policy, catalog, and
         # request all use the same case - prevents case-variant bypass of deny rules.
         tool_name: str = params.get("name", "").lower()
         arguments: dict[str, Any] = params.get("arguments", {})
+
+        # #518: depth/key-count cap, matching scripts/mock_upstream.py.
+        violation = _arg_shape_violation(arguments)
+        if violation is not None:
+            return JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32602, "message": f"Invalid params: {violation}"},
+                    "id": rpc_id,
+                },
+                status_code=400,
+            )
+
         call_id = str(uuid.uuid4())
         # A malformed _cmcp (string, list, number) must not 500 the call path.
         cmcp_params = params.get("_cmcp")
@@ -412,72 +555,7 @@ class MCPServer:
             )
 
         if not result.allowed:
-            deny_reason = result.deny_reason or ""
-            # Upstream transport/tool failure is a 502, not a policy deny.
-            if deny_reason.startswith("upstream_error:"):
-                return JSONResponse(
-                    {
-                        "jsonrpc": "2.0",
-                        "error": {
-                            "code": -32000,
-                            "message": "Upstream MCP server error",
-                            "data": {
-                                "error_code": deny_reason.removeprefix("upstream_error:"),
-                                "call_id": call_id,
-                            },
-                        },
-                        "id": rpc_id,
-                    },
-                    status_code=502,
-                )
-            _HEALTH_REASONS = {"attestation_stale", "catalog_drift"}
-            if result.deny_reason in _HEALTH_REASONS:
-                return JSONResponse(
-                    {
-                        "jsonrpc": "2.0",
-                        "error": {
-                            "code": -32000,
-                            "message": result.deny_reason,
-                            "data": {
-                                "error_code": result.deny_reason.upper(),
-                                "call_id": call_id,
-                            },
-                        },
-                        "id": rpc_id,
-                    },
-                    status_code=503,
-                )
-            # INJECT-003: log deny_reason internally; do not reflect internal detail to caller
-            error_code = (
-                "TOOL_NOT_IN_CATALOG"
-                if "catalog" in (result.deny_reason or "")
-                else "POLICY_DENY"
-            )
-            logger.info(
-                "POLICY_DENY: call_id=%s error_code=%s reason=%s",
-                call_id, error_code, result.deny_reason,
-            )
-            error_data: dict[str, Any] = {
-                "error_code": error_code,
-                "call_id": call_id,
-            }
-            # Advice annotations come from the hash-pinned policy bundle
-            # (operator-authored, not caller input), so reflecting them does
-            # not violate INJECT-003. They carry e.g. HITL escalation payloads.
-            if result.advice:
-                error_data["advice"] = result.advice
-            return JSONResponse(
-                {
-                    "jsonrpc": "2.0",
-                    "error": {
-                        "code": -32000,
-                        "message": "Request denied by policy",
-                        "data": error_data,
-                    },
-                    "id": rpc_id,
-                },
-                status_code=403,
-            )
+            return self._deny_response(rpc_id, call_id, result)
 
         cmcp_meta: dict[str, Any] = {
             "call_id": call_id,

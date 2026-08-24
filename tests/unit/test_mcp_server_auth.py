@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from starlette.testclient import TestClient
 
-from cmcp_runtime.mcp.server import MCPServer
+from cmcp_runtime.mcp.server import _MAX_ARG_DEPTH, _MAX_ARG_KEYS, MCPServer
 
 
 def _make_server(bearer_token: str | None = None) -> MCPServer:
@@ -471,3 +472,152 @@ def test_deny_response_does_not_include_internal_reason():
     assert "Cedar eval error" not in str(body)
     assert "AttributeAccessError" not in str(body)
     assert body["error"]["message"] == "Request denied by policy"
+
+
+# ── #518: strict jsonrpc/id validation, matching scripts/mock_upstream.py ────
+
+def test_missing_jsonrpc_field_returns_invalid_request():
+    server = _make_server()
+    client = TestClient(server.app, raise_server_exceptions=False)
+    resp = client.post("/mcp", json={"method": "initialize", "id": 1})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == -32600
+
+
+def test_wrong_jsonrpc_version_returns_invalid_request():
+    server = _make_server()
+    client = TestClient(server.app, raise_server_exceptions=False)
+    resp = client.post("/mcp", json={"jsonrpc": "1.0", "method": "initialize", "id": 1})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == -32600
+
+
+def test_jsonrpc_version_as_number_is_rejected():
+    """jsonrpc must equal the string "2.0" exactly, not the numeric value 2.0."""
+    server = _make_server()
+    client = TestClient(server.app, raise_server_exceptions=False)
+    resp = client.post("/mcp", json={"jsonrpc": 2.0, "method": "initialize", "id": 1})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == -32600
+
+
+def test_bool_id_returns_invalid_request():
+    """id must be a string, number, or null -- bool is an int subclass but not valid."""
+    server = _make_server()
+    client = TestClient(server.app, raise_server_exceptions=False)
+    resp = client.post("/mcp", json={"jsonrpc": "2.0", "method": "initialize", "id": True})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == -32600
+
+
+def test_object_id_returns_invalid_request():
+    server = _make_server()
+    client = TestClient(server.app, raise_server_exceptions=False)
+    resp = client.post("/mcp", json={"jsonrpc": "2.0", "method": "initialize", "id": {}})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == -32600
+
+
+def test_null_id_is_valid_notification():
+    server = _make_server()
+    client = TestClient(server.app, raise_server_exceptions=False)
+    resp = client.post("/mcp", json={"jsonrpc": "2.0", "method": "initialize", "id": None})
+    assert resp.status_code == 200
+
+
+def test_string_id_is_valid():
+    server = _make_server()
+    client = TestClient(server.app, raise_server_exceptions=False)
+    resp = client.post("/mcp", json={"jsonrpc": "2.0", "method": "initialize", "id": "req-1"})
+    assert resp.status_code == 200
+    assert resp.json()["id"] == "req-1"
+
+
+# ── #518: argument depth/key-count caps, matching scripts/mock_upstream.py ──
+
+def _nested(depth: int) -> Any:
+    value: Any = "leaf"
+    for _ in range(depth):
+        value = {"a": value}
+    return value
+
+
+def test_arguments_within_depth_cap_is_allowed():
+    server = _make_server()
+    client = TestClient(server.app, raise_server_exceptions=False)
+    resp = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "t", "arguments": {"nested": _nested(_MAX_ARG_DEPTH - 1)}},
+            "id": 1,
+        },
+    )
+    assert resp.status_code == 200
+
+
+def test_arguments_exceeding_depth_cap_returns_invalid_params():
+    server = _make_server()
+    client = TestClient(server.app, raise_server_exceptions=False)
+    resp = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "t", "arguments": {"nested": _nested(_MAX_ARG_DEPTH + 10)}},
+            "id": 1,
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == -32602
+
+
+def test_arguments_within_key_cap_is_allowed():
+    server = _make_server()
+    client = TestClient(server.app, raise_server_exceptions=False)
+    arguments = {f"k{i}": i for i in range(_MAX_ARG_KEYS)}
+    resp = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "t", "arguments": arguments},
+            "id": 1,
+        },
+    )
+    assert resp.status_code == 200
+
+
+def test_arguments_exceeding_key_cap_returns_invalid_params():
+    server = _make_server()
+    client = TestClient(server.app, raise_server_exceptions=False)
+    arguments = {f"k{i}": i for i in range(_MAX_ARG_KEYS + 1)}
+    resp = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "t", "arguments": arguments},
+            "id": 1,
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == -32602
+
+
+# ── #518: non-standard JSON values (NaN, Infinity, -Infinity) ───────────────
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+def test_non_standard_json_constant_returns_parse_error(literal):
+    server = _make_server()
+    client = TestClient(server.app, raise_server_exceptions=False)
+    body = (
+        '{"jsonrpc": "2.0", "method": "tools/call", '
+        f'"params": {{"name": "t", "arguments": {{"x": {literal}}}}}, "id": 1}}'
+    )
+    resp = client.post(
+        "/mcp", content=body.encode(), headers={"Content-Type": "application/json"}
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == -32700
