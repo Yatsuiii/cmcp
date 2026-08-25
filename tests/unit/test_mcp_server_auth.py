@@ -672,6 +672,27 @@ def test_depth_cap_violation_inside_a_list_is_caught():
     assert resp.json()["error"]["code"] == -32602
 
 
+def test_well_formed_list_in_arguments_is_accepted():
+    """The list walk must fall through cleanly when nothing inside it violates a
+    cap. Without this the only list coverage is the rejection path, which would
+    still pass if the walk rejected every list it saw."""
+    server = _make_server()
+    client = TestClient(server.app, raise_server_exceptions=False)
+    resp = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+                "name": "t",
+                "arguments": {"items": [1, "ok", {"nested": ["fine"]}, None]},
+            },
+            "id": 1,
+        },
+    )
+    assert resp.status_code != 400
+
+
 def test_arguments_within_key_cap_is_allowed():
     server = _make_server()
     client = TestClient(server.app, raise_server_exceptions=False)

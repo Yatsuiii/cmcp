@@ -484,6 +484,24 @@ def test_oversized_object_key_returns_invalid_params(upstream):
     assert body["id"] == 38
 
 
+def test_well_formed_list_in_arguments_is_accepted(upstream):
+    """The list walk must fall through cleanly when nothing inside it violates a
+    cap, mirroring the same case in tests/unit/test_mcp_server_auth.py."""
+    req = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 40,
+            "method": "tools/call",
+            "params": {
+                "name": "echo",
+                "arguments": {"items": [1, "ok", {"nested": ["fine"]}, None]},
+            },
+        }
+    ).encode()
+    status, _ = _post(upstream, req)
+    assert status == 200
+
+
 def test_oversized_string_nested_inside_arguments_is_caught(upstream):
     """The cap applies at any depth, not only to top-level string values."""
     req = json.dumps(
