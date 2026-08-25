@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from starlette.testclient import TestClient
 
-from cmcp_runtime.mcp.server import _MAX_ARG_DEPTH, _MAX_ARG_KEYS, MCPServer
+from cmcp_runtime.mcp.server import (
+    _MAX_ARG_DEPTH,
+    _MAX_ARG_KEYS,
+    _MAX_ARG_STRING_LENGTH,
+    MCPServer,
+)
 
 
 def _make_server(bearer_token: str | None = None) -> MCPServer:
@@ -694,6 +700,91 @@ def test_arguments_exceeding_key_cap_returns_invalid_params():
             "params": {"name": "t", "arguments": arguments},
             "id": 1,
         },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == -32602
+
+
+# ── #562: argument string-length cap, matching scripts/mock_upstream.py ─────
+
+def test_string_within_length_cap_is_allowed():
+    server = _make_server()
+    client = TestClient(server.app, raise_server_exceptions=False)
+    resp = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "t", "arguments": {"text": "a" * 1000}},
+            "id": 1,
+        },
+    )
+    assert resp.status_code == 200
+
+
+def test_string_exceeding_length_cap_returns_invalid_params():
+    server = _make_server()
+    client = TestClient(server.app, raise_server_exceptions=False)
+    resp = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "t", "arguments": {"text": "a" * (_MAX_ARG_STRING_LENGTH + 1)}},
+            "id": 1,
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == -32602
+
+
+def test_oversized_object_key_returns_invalid_params():
+    """A huge key is as expensive as a huge value and is not bounded by the
+    key *count* cap, so it must be rejected on its own."""
+    server = _make_server()
+    client = TestClient(server.app, raise_server_exceptions=False)
+    key = "a" * (_MAX_ARG_STRING_LENGTH + 1)
+    resp = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "t", "arguments": {key: 1}},
+            "id": 1,
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == -32602
+
+
+def test_multibyte_string_length_measured_in_bytes_not_characters():
+    """A 4-byte-per-char string well under the byte cap in character count
+    but over it in UTF-8 bytes must still be rejected."""
+    # U+1F600 (😀) is 4 bytes in UTF-8, 1 codepoint in Python's len(). Choose
+    # a character count that clears the string cap in bytes while staying
+    # well under the server's default max_request_bytes once JSON-encoded.
+    char_count = (_MAX_ARG_STRING_LENGTH // 4) + 1
+    oversized_by_bytes = "\U0001F600" * char_count
+    assert len(oversized_by_bytes.encode("utf-8")) > _MAX_ARG_STRING_LENGTH
+    server = _make_server()
+    client = TestClient(server.app, raise_server_exceptions=False)
+    # Built and encoded by hand with ensure_ascii=False, rather than passed
+    # via the json= kwarg: both json.dumps' default and httpx's json=
+    # encoder escape each emoji to a 12-byte \uXXXX\uXXXX surrogate pair,
+    # inflating the wire size far past the string's actual UTF-8 length and
+    # tripping max_request_bytes instead of the check this test targets.
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "t", "arguments": {"text": oversized_by_bytes}},
+            "id": 1,
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    assert len(body) < 1_000_000
+    resp = client.post(
+        "/mcp", content=body, headers={"Content-Type": "application/json"}
     )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == -32602

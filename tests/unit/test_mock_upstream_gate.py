@@ -20,7 +20,11 @@ from typing import Any
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-from mock_upstream import MockMCPHandler  # noqa: E402
+from mock_upstream import (  # noqa: E402
+    _MAX_ARG_STRING_LENGTH,
+    MAX_REQUEST_BYTES,
+    MockMCPHandler,
+)
 
 
 @pytest.fixture(scope="module")
@@ -227,17 +231,23 @@ def test_far_oversized_request_beyond_the_drain_ceiling_still_gets_a_clean_respo
 
 
 def test_request_at_the_limit_is_accepted(upstream):
-    # Build a request whose total serialized size sits just under the cap.
-    filler_len = 1_000_000 - 200
+    # Build a request whose total serialized size sits just under the whole
+    # body cap. Split across two string fields, each under the separate
+    # per-string length cap (#562), so this test stays targeted at the
+    # DOS-001 whole-body boundary rather than also tripping the string cap.
+    field_len = _MAX_ARG_STRING_LENGTH - 100
     body = json.dumps(
         {
             "jsonrpc": "2.0",
             "id": 10,
             "method": "tools/call",
-            "params": {"name": "echo", "arguments": {"message": "x" * filler_len}},
+            "params": {
+                "name": "echo",
+                "arguments": {"a": "x" * field_len, "b": "x" * field_len},
+            },
         }
     ).encode()
-    assert len(body) < 1_000_000
+    assert len(body) < MAX_REQUEST_BYTES
     status, resp = _post(upstream, body)
     assert status == 200
     assert resp["id"] == 10
@@ -415,6 +425,109 @@ def test_arguments_within_key_count_cap_are_accepted(upstream):
     ).encode()
     status, body = _post(upstream, req)
     assert status == 200
+
+
+# ---------------------------------------------------------------------------
+# Argument string-length cap (#562, docs/spec/proxy-security.md MAX_STRING_LENGTH)
+# ---------------------------------------------------------------------------
+
+
+def test_string_within_length_cap_is_accepted(upstream):
+    req = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 34,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"text": "a" * 1000}},
+        }
+    ).encode()
+    status, body = _post(upstream, req)
+    assert status == 200
+
+
+def test_string_past_length_cap_returns_invalid_params(upstream):
+    # Past the string cap but comfortably under MAX_REQUEST_BYTES, so this
+    # exercises the string-length check itself, not the whole-body size gate.
+    assert _MAX_ARG_STRING_LENGTH + 1 < MAX_REQUEST_BYTES
+    req = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 35,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"text": "a" * (_MAX_ARG_STRING_LENGTH + 1)}},
+        }
+    ).encode()
+    status, body = _post(upstream, req)
+    assert status == 400
+    assert body["error"]["code"] == -32602
+    assert body["id"] == 35
+
+
+def test_oversized_object_key_returns_invalid_params(upstream):
+    """A huge key is as expensive as a huge value and is not bounded by the
+    key *count* cap, so it must be rejected on its own."""
+    key = "a" * (_MAX_ARG_STRING_LENGTH + 1)
+    req = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 38,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {key: 1}},
+        }
+    ).encode()
+    # Reachable: over the string cap but still under the whole-body cap, so
+    # this exercises the key check rather than DOS-001's size rejection.
+    assert len(req) < MAX_REQUEST_BYTES
+    status, body = _post(upstream, req)
+    assert status == 400
+    assert body["error"]["code"] == -32602
+    assert body["id"] == 38
+
+
+def test_oversized_string_nested_inside_arguments_is_caught(upstream):
+    """The cap applies at any depth, not only to top-level string values."""
+    req = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 36,
+            "method": "tools/call",
+            "params": {
+                "name": "echo",
+                "arguments": {"child": {"text": "a" * (_MAX_ARG_STRING_LENGTH + 1)}},
+            },
+        }
+    ).encode()
+    status, body = _post(upstream, req)
+    assert status == 400
+    assert body["error"]["code"] == -32602
+
+
+def test_multibyte_string_length_measured_in_bytes_not_characters(upstream):
+    """A 4-byte-per-char string well under the byte cap in character count
+    but over it in UTF-8 bytes must still be rejected."""
+    # U+1F600 (😀) is 4 bytes in UTF-8, 1 codepoint in Python's len(). Choose
+    # a character count that clears the string cap in bytes while staying
+    # well under MAX_REQUEST_BYTES once JSON-encoded.
+    char_count = (_MAX_ARG_STRING_LENGTH // 4) + 1
+    oversized_by_bytes = "\U0001F600" * char_count
+    assert len(oversized_by_bytes.encode("utf-8")) > _MAX_ARG_STRING_LENGTH
+    # ensure_ascii=False: the default True would escape each emoji to a
+    # 12-byte \uXXXX\uXXXX surrogate pair, inflating the wire size far past
+    # the string's actual UTF-8 length and tripping MAX_REQUEST_BYTES
+    # instead of the check this test targets.
+    req = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 37,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"text": oversized_by_bytes}},
+        },
+        ensure_ascii=False,
+    ).encode()
+    assert len(req) < MAX_REQUEST_BYTES
+    status, body = _post(upstream, req)
+    assert status == 400
+    assert body["error"]["code"] == -32602
 
 
 # ---------------------------------------------------------------------------
