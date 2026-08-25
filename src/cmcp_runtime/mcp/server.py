@@ -41,6 +41,12 @@ logger = logging.getLogger(__name__)
 # Endpoints exempt from bearer-token auth (Kubernetes liveness / readiness probes)
 _AUTH_EXEMPT_PATHS = {"/health", "/readyz"}
 
+# DOS-001: default ceiling on a single request body. Overridable per
+# deployment via MCPServer(max_request_bytes=...). Named here rather than
+# left inline on the constructor so the argument-shape caps below can be
+# derived from it instead of restating the number.
+_DEFAULT_MAX_REQUEST_BYTES = 1_000_000
+
 # #518: DOS-001's byte cap bounds total size, not shape. A payload well under
 # the limit can still push toward Python's recursion limit through deep
 # nesting, or cost real time to iterate through a flat object with thousands
@@ -50,6 +56,29 @@ _AUTH_EXEMPT_PATHS = {"/health", "/readyz"}
 # unified per qubeena07's review on #518.
 _MAX_ARG_DEPTH = 20
 _MAX_ARG_KEYS = 256
+
+# #562: docs/spec/proxy-security.md's Fuzzing Definition of Done specs
+# MAX_STRING_LENGTH at 1MB per string field, separate from the depth/key
+# caps above. A single oversized string can sit inside an otherwise
+# shallow, low-key-count payload and slip past both of those unbounded,
+# up to whatever the whole-body byte cap happens to be.
+#
+# Not set to the spec's literal 1MB: that equals the whole-body default
+# below, and a 1MB string plus any JSON structure around it already
+# exceeds that cap, so the check could never fire before DOS-001's size
+# rejection already had. Derived from the default instead, so a single
+# string cannot consume the whole request budget, the cap is actually
+# reachable, and raising the default carries this along with it rather
+# than silently leaving it behind. This is scoped against the *default*
+# max_request_bytes; a deployment that configures a smaller value simply
+# has the whole-body cap bind first, which is a safe direction to fail
+# in, not a gap. Worth revisiting to the spec's literal value if the
+# default is ever raised toward the spec's stated 10MB (see #562).
+#
+# Checked as UTF-8 byte length, not character count, since a codepoint
+# count understates the actual memory and processing cost of multi-byte
+# text.
+_MAX_ARG_STRING_LENGTH = _DEFAULT_MAX_REQUEST_BYTES // 2
 
 
 def _reject_nan_and_infinity(text: str) -> float:
@@ -62,23 +91,41 @@ def _valid_rpc_id(value: Any) -> bool:
     return value is None or (isinstance(value, (str, int, float)) and not isinstance(value, bool))
 
 
+def _over_string_cap(text: str) -> bool:
+    return len(text.encode("utf-8")) > _MAX_ARG_STRING_LENGTH
+
+
+def _object_shape_violation(value: dict[str, Any], depth: int) -> str | None:
+    if len(value) > _MAX_ARG_KEYS:
+        return f"object has more than {_MAX_ARG_KEYS} keys"
+    for key, child in value.items():
+        # Keys carry the same cost as values and are not covered by the key
+        # *count* cap above, so a single huge key would otherwise slip
+        # through every check here.
+        if isinstance(key, str) and _over_string_cap(key):
+            return f"object key over the length cap of {_MAX_ARG_STRING_LENGTH} bytes"
+        violation = _arg_shape_violation(child, depth=depth + 1)
+        if violation is not None:
+            return violation
+    return None
+
+
 def _arg_shape_violation(value: Any, *, depth: int = 0) -> str | None:
-    """Return a message describing the first depth/key-count violation found
-    under `value`, or None if it fits within `_MAX_ARG_DEPTH` / `_MAX_ARG_KEYS`."""
+    """Return a message describing the first depth/key-count/string-length
+    violation found under `value`, or None if it fits within `_MAX_ARG_DEPTH` /
+    `_MAX_ARG_KEYS` / `_MAX_ARG_STRING_LENGTH`."""
     if depth > _MAX_ARG_DEPTH:
         return f"arguments nested past the depth cap of {_MAX_ARG_DEPTH}"
     if isinstance(value, dict):
-        if len(value) > _MAX_ARG_KEYS:
-            return f"object has more than {_MAX_ARG_KEYS} keys"
-        for child in value.values():
-            violation = _arg_shape_violation(child, depth=depth + 1)
-            if violation is not None:
-                return violation
-    elif isinstance(value, list):
+        return _object_shape_violation(value, depth)
+    if isinstance(value, list):
         for child in value:
             violation = _arg_shape_violation(child, depth=depth + 1)
             if violation is not None:
                 return violation
+        return None
+    if isinstance(value, str) and _over_string_cap(value):
+        return f"string value over the length cap of {_MAX_ARG_STRING_LENGTH} bytes"
     return None
 
 
@@ -255,7 +302,7 @@ class MCPServer:
         audit_chain: AuditChain | None = None,
         bearer_token: str | None = None,
         session: SessionState | None = None,
-        max_request_bytes: int = 1_000_000,
+        max_request_bytes: int = _DEFAULT_MAX_REQUEST_BYTES,
     ) -> None:
         self._proxy = proxy
         self._session_manager = session_manager
@@ -506,7 +553,8 @@ class MCPServer:
         tool_name: str = params.get("name", "").lower()
         arguments: dict[str, Any] = params.get("arguments", {})
 
-        # #518: depth/key-count cap, matching scripts/mock_upstream.py.
+        # #518/#562: depth, key-count and string-length caps, matching
+        # scripts/mock_upstream.py.
         violation = _arg_shape_violation(arguments)
         if violation is not None:
             return JSONResponse(

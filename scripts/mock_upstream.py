@@ -43,6 +43,26 @@ DRAIN_CEILING_BYTES = 10 * MAX_REQUEST_BYTES
 _MAX_ARG_DEPTH = 20
 _MAX_ARG_KEYS = 256
 
+# #562: docs/spec/proxy-security.md's Fuzzing Definition of Done specs
+# MAX_STRING_LENGTH at 1MB per string field, separate from the depth/key
+# caps above. A single oversized string can sit inside an otherwise
+# shallow, low-key-count payload and slip past both of those unbounded,
+# up to whatever the whole-body byte cap happens to be.
+#
+# Not set to the spec's literal 1MB: that would equal MAX_REQUEST_BYTES
+# itself, and a 1MB string plus any JSON structure around it already
+# exceeds the whole-body cap, so the check could never fire before
+# DOS-001's size rejection already had. Set to half of MAX_REQUEST_BYTES
+# instead, so a single string cannot consume the whole request budget and
+# the cap is actually reachable. Worth revisiting to the spec's literal
+# value if MAX_REQUEST_BYTES itself is ever raised toward the spec's
+# stated 10MB (see #562).
+#
+# Checked as UTF-8 byte length, not character count, since a codepoint
+# count understates the actual memory and processing cost of multi-byte
+# text.
+_MAX_ARG_STRING_LENGTH = MAX_REQUEST_BYTES // 2
+
 logger = logging.getLogger("mock_upstream")
 
 
@@ -56,23 +76,41 @@ def _valid_rpc_id(value: Any) -> bool:
     return value is None or (isinstance(value, (str, int, float)) and not isinstance(value, bool))
 
 
+def _over_string_cap(text: str) -> bool:
+    return len(text.encode("utf-8")) > _MAX_ARG_STRING_LENGTH
+
+
+def _object_shape_violation(value: dict[str, Any], depth: int) -> str | None:
+    if len(value) > _MAX_ARG_KEYS:
+        return f"object has more than {_MAX_ARG_KEYS} keys"
+    for key, child in value.items():
+        # Keys carry the same cost as values and are not covered by the key
+        # *count* cap above, so a single huge key would otherwise slip
+        # through every check here.
+        if isinstance(key, str) and _over_string_cap(key):
+            return f"object key over the length cap of {_MAX_ARG_STRING_LENGTH} bytes"
+        violation = _arg_shape_violation(child, depth=depth + 1)
+        if violation is not None:
+            return violation
+    return None
+
+
 def _arg_shape_violation(value: Any, *, depth: int = 0) -> str | None:
-    """Return a message describing the first depth/key-count violation found
-    under `value`, or None if it fits within `_MAX_ARG_DEPTH` / `_MAX_ARG_KEYS`."""
+    """Return a message describing the first depth/key-count/string-length
+    violation found under `value`, or None if it fits within `_MAX_ARG_DEPTH` /
+    `_MAX_ARG_KEYS` / `_MAX_ARG_STRING_LENGTH`."""
     if depth > _MAX_ARG_DEPTH:
         return f"arguments nested past the depth cap of {_MAX_ARG_DEPTH}"
     if isinstance(value, dict):
-        if len(value) > _MAX_ARG_KEYS:
-            return f"object has more than {_MAX_ARG_KEYS} keys"
-        for child in value.values():
-            violation = _arg_shape_violation(child, depth=depth + 1)
-            if violation is not None:
-                return violation
-    elif isinstance(value, list):
+        return _object_shape_violation(value, depth)
+    if isinstance(value, list):
         for child in value:
             violation = _arg_shape_violation(child, depth=depth + 1)
             if violation is not None:
                 return violation
+        return None
+    if isinstance(value, str) and _over_string_cap(value):
+        return f"string value over the length cap of {_MAX_ARG_STRING_LENGTH} bytes"
     return None
 
 
