@@ -55,7 +55,7 @@ This document states 10MB. Both implementations enforce 1MB: `scripts/mock_upstr
 
 At the implemented 1MB, the per-string cap this document originally stated as a literal 1MB was exactly the whole-body cap, which is how the unreachable case above was found. Deriving the cap removes the dead-code hazard at either value, but the disagreement itself is still open: nothing records whether 1MB was a deliberate tightening or drift from this spec.
 
-Tracked on #562. Implementers should follow the enforced body cap and the ratio above until that is settled, rather than raising a body cap to match this document.
+Tracked on #573. Implementers should follow the enforced body cap and the ratio above until that is settled, rather than raising a body cap to match this document.
 
 ## Malformed Input Handling
 
