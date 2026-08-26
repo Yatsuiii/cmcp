@@ -1,135 +1,179 @@
-# Session-Independent Execution Correlation
+# Session Independent Execution Correlation
 
-Status: proposal for [#565](https://github.com/agentrust-io/cmcp/issues/565), not
-adopted. This document does not change the cMCP protocol.
+Status: agreed design for
+[#565](https://github.com/agentrust-io/cmcp/issues/565). Implementation remains
+separate. This document does not itself change the cMCP protocol.
 
-[mcp-2026-roadmap-impact.md](mcp-2026-roadmap-impact.md) lists this as P0 and
-first in the issue sequence: "Replace dependence on MCP initialization/session
-lifetime with a cMCP execution identifier carried across requests. A TRACE claim
-must remain joinable without implying an MCP protocol session."
+[mcp-2026-roadmap-impact.md](mcp-2026-roadmap-impact.md) places this work first
+in the issue sequence. cMCP needs an execution identifier that survives
+independent requests while TRACE evidence remains joinable without implying an
+MCP protocol session.
 
 ## What binds evidence today
 
-Worth stating precisely, because the dependence is not where the phrase
-"MCP session" suggests.
+The current dependence is not where the phrase "MCP session" suggests.
 
-`initialize` does not create anything. `MCPServer._handle_mcp` answers it at
-`server.py:449` by negotiating a protocol version and returning capabilities. No
-session is minted, no `Mcp-Session-Id` is issued, and nothing about the handshake
-is carried into evidence.
+`initialize` does not create an identity. `MCPServer._handle_mcp` answers it at
+`server.py:449` by negotiating a protocol version and returning capabilities.
+No session is minted, no `Mcp-Session-Id` is issued, and nothing about the
+handshake is carried into evidence.
 
-The binding is entirely gateway-side:
+The binding is entirely inside the gateway:
 
 | Identifier | Origin | Scope |
 |---|---|---|
 | `session_id` | `SessionManager.create_session`, `session/manager.py:118`, a `uuid4` | One gateway session |
-| `call_id` | `server.py:569`, a fresh `uuid4` per `tools/call` | One tool call |
-| `workflow_id` | caller-supplied via `params._cmcp.workflow_id`, `server.py:571-575` | Caller-defined |
+| `call_id` | `server.py:569`, a fresh `uuid4` per `tools/call` | One tool call attempt |
+| `workflow_id` | supplied through `params._cmcp.workflow_id`, `server.py:571-575` | Caller defined grouping |
 
-`session_id` is what everything joins on. Audit entries carry it, the TRACE Claim
-is issued per session on close and stored keyed by it (`manager.py:182`), and the
-read paths are `/sessions/{session_id}/trace-claim` and
+The current path therefore has three identifiers but no validated correlation
+key that a caller can carry across independent requests. The gateway mints
+`session_id` and `call_id`. The caller supplies `workflow_id`, but cMCP does
+not validate it as execution identity.
+
+`session_id` is what evidence joins on today. Audit entries carry it, the TRACE
+Claim is issued per session on close and stored under it
+(`manager.py:182`), and the read paths are
+`/sessions/{session_id}/trace-claim` and
 `/audit/export?session_id=` (`server.py:341`, `server.py:705`). At session
-creation the audit chain root is bound into TEE `report_data` where the platform
-supports it, and `manager.py` warns explicitly when it could not be.
+creation the audit chain root is bound into TEE `report_data` where the
+platform supports it. `manager.py` warns when that binding fails.
 
-So a cMCP session is a gateway lifetime with a hardware-anchored chain root and
-one claim at the end. It is not an MCP protocol session and never was.
+A cMCP session is a gateway lifetime with one chain root and one claim at the
+end. It is not an MCP protocol session.
 
 ## The gap
 
-The problem is not that sessions disappear from the protocol. It is that
-`session_id` is the only cross-request correlation key, and it carries two jobs
-that stop being compatible once work arrives as independent requests:
+`session_id` is the only validated correlation key, and it carries two jobs
+that stop fitting together when work arrives through independent requests:
 
-1. It scopes the evidence bundle, one chain root, one claim.
-2. It is the only thing relating two calls that belong to the same intent.
+1. It scopes one evidence bundle, one chain root, and one claim.
+2. It relates calls that belong to one execution.
 
-With independent requests there are two options and both fail:
+One long lived session preserves correlation, but its claim grows without bound
+and is unavailable until close. A session per request keeps claims bounded and
+prompt, but each request gets a separate chain root and multiple request work
+becomes impossible to join.
 
-**One long-lived session.** Correlation works, but the TRACE Claim grows without
-bound and evidence is not available until close. A claim that never closes is not
-evidence anyone can act on.
+`workflow_id` groups related work by caller intent, but it is not a validated
+execution identity and cannot carry this responsibility alone.
 
-**A session per request.** Claims stay small and prompt, but every call is its
-own chain root and nothing relates two calls. Multi-request work becomes
-unjoinable, which is exactly what the roadmap requires stay joinable.
+Issue [#571](https://github.com/agentrust-io/cmcp/issues/571) makes the failure
+concrete. A fault after upstream invocation can leave the effect uncertain. A
+later request gets a fresh `call_id`, so cMCP cannot relate the attempts. With
+one session per request, the attempts also land in separate chain roots.
 
-`workflow_id` is closest to prior art here, but it is caller-supplied and
-unverified, so it cannot carry correlation on its own.
+## Agreed design
 
-There is a concrete failure already filed. In
-[#571](https://github.com/agentrust-io/cmcp/issues/571) a post-upstream fault can
-leave a call whose outcome nobody can establish. A caller retrying that intent
-gets a fresh `call_id` (`server.py:569` mints one per call, with no
-caller-supplied path), so the two attempts are uncorrelated. Under one session
-per request they land in different chain roots entirely. An execution identifier
-is what would let a verifier see one intent with two attempts rather than two
-unrelated calls.
+cMCP adds `execution_id` with these rules:
 
-## Proposal
+1. `execution_id` is a typed `AuditEntry` field, not a `detail` key. The
+   field is always serialized, including `null` when absent.
+2. Collision within one authenticated agent identity is refused.
+3. The TRACE Claim does not enumerate `execution_id` values.
+4. Reuse after a terminal outcome is refused with no replay window.
+5. `execution_id` and `workflow_id` remain independent.
 
-A cMCP `execution_id` that is:
+The caller supplies the value beside `workflow_id` in `params._cmcp`. The
+gateway validates it and scopes it under the authenticated agent identity.
+`execution_id` does not replace `session_id`, `call_id`, or `workflow_id`.
+Audit bundles remain joinable offline because each relevant entry carries the
+identifier.
 
-- **caller-asserted, gateway-validated.** The caller supplies it so retries of
-  the same intent can carry the same value. The gateway validates shape and
-  binds it into the audit entry, so it is evidence rather than a hint.
-- **independent of session lifetime.** It appears in audit entries alongside
-  `session_id` rather than replacing it. Sessions keep scoping evidence bundles;
-  `execution_id` correlates across them.
-- **offline-joinable.** A verifier holding two audit bundles from two sessions
-  can join them on `execution_id` without contacting the gateway, which is the
-  roadmap's stated invariant.
+The existing `params._cmcp` envelope keeps the design neutral across
+transports and avoids depending on future HTTP header design.
 
-Carried in `params._cmcp` next to the existing `workflow_id`, so it rides a
-transport-neutral envelope the gateway already parses rather than a header. The
-roadmap lists HTTP-native transport as P1 with no issue filed yet, so anything
-depending on header semantics would be making a bet on work that has not been
-scoped.
+## Identity and claim boundary
 
-## Against #565's acceptance evidence
+The action receipt discussion in
+[trace-spec#66](https://github.com/agentrust-io/trace-spec/issues/66#issuecomment-5428368994)
+states the boundary directly:
 
-**Correlation across retries and multi-request work.** The reason for a
-caller-asserted value. A gateway-minted identifier cannot correlate a retry,
-since the gateway cannot tell a retry from a new intent, which is the situation
-today.
+`attempt identity ≠ logical operation identity ≠ external outcome identity`
 
-**Explicit collision, replay and missing-context failures.** Caller-asserted
-means adversary-asserted, so these are the load-bearing cases.
-- *Collision:* two callers assert the same value. Scoping under the authenticated
-  agent identity contains this, but it needs deciding whether collision inside
-  one identity is refused or recorded.
-- *Replay:* an `execution_id` reused after a terminal outcome. Related to #571:
-  reuse after `outcome_unknown` is the case that matters and is the one worth
-  refusing.
-- *Missing context:* absent `execution_id` must stay legal, and the entry records
-  its absence rather than synthesising a value, otherwise the field cannot be
-  trusted where it is present.
+1. `call_id` identifies one attempt.
+2. `execution_id` supplies validated correlation for one executable unit across
+   requests and attempts.
+3. External outcome evidence, when present and independently verifiable,
+   establishes what can be claimed about the external effect.
 
-**Protocol-version vectors.** Not answered here. It belongs with the SDK
-conformance matrix the roadmap lists as P1, and I would rather not invent a
-version-negotiation story ahead of that.
+A shared `execution_id` establishes a validated correlation claim. It does not
+by itself prove that two requests express the same logical operation, and it
+does not prove that an external effect occurred.
 
-**TRACE records remain offline-joinable.** The join key is in the audit entry, so
-two bundles join without the gateway. What is not settled is whether the TRACE
-Claim itself should surface the set of `execution_id` values it covers. That
-makes joining cheaper and leaks a little about the caller's structure to whoever
-holds the claim.
+Classifying a later request as the same logical operation also requires an
+immutable canonical action or intent binding. If the same `execution_id` is
+presented with a different binding, the request is a collision or a mutated
+operation, not a retry, and the gateway must refuse it before upstream
+invocation.
 
-## Open decisions
+This document does not add another schema field for that binding. The
+implementation must define how it verifies the binding. Until it can verify one,
+it may report that records share an asserted `execution_id`, but it must not
+claim that they are the same logical operation.
 
-Flagged rather than assumed:
+## Collision, replay, and missing context
 
-1. Does `execution_id` go in `AuditEntry` as a field, or in the existing
-   `detail` dict? A field is greppable and typed; `detail` avoids a schema change
-   on an append-only hashed structure.
-2. Collision inside a single agent identity: refuse, or record and let the
-   verifier see it?
-3. Should the TRACE Claim enumerate covered `execution_id` values?
-4. Is a replay window needed, or is "refuse reuse after a terminal outcome"
-   enough?
-5. Does this interact with `workflow_id` such that one of them should be derived
-   from the other, or do they stay independent?
+Collision is scoped under authenticated agent identity. The same value used by
+different agent identities does not collide. Within one agent identity, a value
+that conflicts with the existing immutable action or intent binding is refused
+and recorded as a collision.
 
-Opened as a draft so the shape can be argued before anything is built. Happy to
-implement whichever way these land, or to close this if the direction is wrong.
+Reuse after a terminal outcome is refused. There is no replay window. This rule
+includes `outcome_unknown`: uncertainty must not become permission to repeat an
+irreversible effect. The refusal remains auditable under the asserted
+`execution_id`, so offline verification can relate it to the earlier terminal
+record without allowing another upstream invocation.
+
+An execution that never reaches a terminal outcome is never reusable and never
+expires. A stuck execution therefore holds its identifier until an explicit
+recovery design exists. This is the fail closed result.
+
+Missing `execution_id` remains legal for compatibility. The typed audit field
+records `null` rather than synthesizing a value. Consumers can trust that a
+present value came from the validated caller path.
+
+## Implementation invariants
+
+Collision and replay decisions require one authoritative execution state keyed
+by authenticated agent identity and `execution_id`.
+
+Admission must atomically reserve a new identifier and its immutable action or
+intent binding before upstream invocation. A concurrent request must not be
+able to reserve the same key with a conflicting binding. A terminal transition
+must be durable before a later request is classified as replay.
+
+The storage and recovery mechanism remains implementation work. This document
+does not add a wire field for it. The implementation evidence must include
+concurrent collision, process restart, terminal persistence failure, and replay
+tests.
+
+## Relationship to workflow identity
+
+`workflow_id` and `execution_id` remain independent.
+
+`workflow_id` groups work that belongs together by intent.
+`execution_id` correlates one executable unit across requests and attempts.
+Deriving either value from the other would collapse two distinct questions and
+would not be reversible.
+
+If operational evidence later shows a one to one relationship, that is an
+observation, not a constraint.
+
+## Against #565 acceptance evidence
+
+**Correlation across retries and multiple request work.** A caller asserted
+value lets independent audit entries retain one validated correlation key. The
+identifier makes records joinable. It does not grant permission to execute a
+replay after a terminal outcome.
+
+**Explicit collision, replay, and missing context failures.** Collision within
+one authenticated agent identity is refused. Reuse after a terminal outcome is
+refused without a time window. Missing context is represented by a typed
+`null`.
+
+**Protocol version vectors.** The SDK conformance matrix owns protocol version
+coverage. This design does not invent version negotiation behavior.
+
+**TRACE records remain joinable offline.** The audit entry carries the join key.
+The Claim binds the chain and does not duplicate its identifiers.
