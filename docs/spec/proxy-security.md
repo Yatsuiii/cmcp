@@ -38,8 +38,24 @@ These constants are hard-coded in the proxy implementation. They are not configu
 MAX_REQUEST_BYTES = 10 * 1024 * 1024  # 10MB
 MAX_JSON_NESTING_DEPTH = 64
 MAX_PARSE_TIME_MS = 100
-MAX_STRING_LENGTH = 1 * 1024 * 1024   # 1MB per string field
+MAX_STRING_LENGTH = MAX_REQUEST_BYTES // 2   # per string field, see invariant below
 ```
+
+### MAX_STRING_LENGTH is a ratio, not an absolute
+
+`MAX_STRING_LENGTH` must stay meaningfully below `MAX_REQUEST_BYTES`, and it is written above as a derivation rather than a literal so that it cannot drift out of that relationship.
+
+The invariant matters because violating it produces a check that reads like a control and can never fire. A single string at or above the whole-body cap makes a request the body-size check already rejects, so the per-string check is unreachable on every input that survives long enough to reach it. That is worse than an absent check: an absent control is visible as missing, while a present one passes review, passes an audit read of the source, and counts toward this Definition of Done.
+
+An implementation MUST derive the per-string cap from whatever whole-body cap it enforces. It MUST NOT restate the value as a literal, since a later change to the body cap then silently recreates the unreachable condition at a new ratio.
+
+### Open: MAX_REQUEST_BYTES disagrees with the implementation
+
+This document states 10MB. Both implementations enforce 1MB: `scripts/mock_upstream.py` and `MCPServer.__init__` in `src/cmcp_runtime/mcp/server.py`.
+
+At the implemented 1MB, the per-string cap this document originally stated as a literal 1MB was exactly the whole-body cap, which is how the unreachable case above was found. Deriving the cap removes the dead-code hazard at either value, but the disagreement itself is still open: nothing records whether 1MB was a deliberate tightening or drift from this spec.
+
+Tracked on #573. Implementers should follow the enforced body cap and the ratio above until that is settled, rather than raising a body cap to match this document.
 
 ## Malformed Input Handling
 
