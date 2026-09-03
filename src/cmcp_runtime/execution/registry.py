@@ -207,14 +207,6 @@ class ExecutionRegistry:
                     self._conn.commit()
                     return Admission(AdmissionStatus.ADMITTED, action_binding)
                 self._conn.rollback()
-            except sqlite3.IntegrityError:
-                # Lost an insert race with a concurrent admit of the same key.
-                self._conn.rollback()
-                row = self._conn.execute(
-                    "SELECT state, action_binding FROM executions "
-                    "WHERE agent_identity=? AND execution_id=?",
-                    (agent_identity, execution_id),
-                ).fetchone()
             except BaseException:
                 self._conn.rollback()
                 raise

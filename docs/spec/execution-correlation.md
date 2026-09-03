@@ -223,7 +223,8 @@ owner. It is a SQLite-backed module, one instance per gateway process, keyed by
   transaction needs a shared single-writer datastore and is out of this slice.
 - No cross-process reservation fencing beyond SQLite's `BEGIN IMMEDIATE` plus
   `busy_timeout`. Multiple gateway processes on one registry file serialize
-  admissions; a lost insert race re-reads and classifies.
+  admissions; a competing writer either observes the committed reservation or
+  fails closed if the lock timeout is exceeded.
 - This slice does not itself verify that two requests express the same logical
   operation beyond an identical action binding. It reports a shared asserted
   `execution_id`; it does not claim exactly-once external execution.

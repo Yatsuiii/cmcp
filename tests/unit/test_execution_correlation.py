@@ -205,6 +205,43 @@ def test_injected_persistence_failure_during_finalize_fails_closed(tmp_path):
     assert replay.status is AdmissionStatus.REPLAY_OUTCOME_UNKNOWN
 
 
+def test_injected_persistence_failure_during_recovery_rolls_back(tmp_path):
+    reg = _registry(tmp_path)
+    _admit(reg, execution_id="exec-recover")
+
+    def fail_the_recovery_update(_real, sql, _args):
+        if sql.startswith("UPDATE executions SET state='outcome_unknown'"):
+            raise sqlite3.OperationalError("disk I/O error (injected)")
+
+    reg._conn = _InterceptConn(reg._conn, fail_the_recovery_update)
+    with pytest.raises(sqlite3.OperationalError):
+        reg.recover()
+    reg._conn = reg._conn._real
+
+    row = reg._conn.execute(
+        "SELECT state FROM executions WHERE execution_id='exec-recover'"
+    ).fetchone()
+    assert row == ("in_flight",)
+    reg.close()
+
+
+def test_injected_persistence_failure_during_admission_rolls_back(tmp_path):
+    reg = _registry(tmp_path)
+
+    def fail_the_insert(_real, sql, _args):
+        if sql.startswith("INSERT INTO executions"):
+            raise sqlite3.OperationalError("disk I/O error (injected)")
+
+    reg._conn = _InterceptConn(reg._conn, fail_the_insert)
+    with pytest.raises(sqlite3.OperationalError):
+        _admit(reg, execution_id="exec-admit")
+    reg._conn = reg._conn._real
+
+    assert reg._conn.execute("SELECT COUNT(*) FROM executions").fetchone() == (0,)
+    assert _admit(reg, execution_id="exec-admit").status is AdmissionStatus.ADMITTED
+    reg.close()
+
+
 def test_concurrent_admits_of_one_key_reserve_exactly_once(tmp_path):
     """Two threads racing to admit the same key: exactly one is ADMITTED, the
     other is classified as a replay. No double reservation, no exception."""
@@ -238,3 +275,34 @@ def test_concurrent_admits_of_one_key_reserve_exactly_once(tmp_path):
         "SELECT COUNT(*) FROM executions WHERE execution_id='exec-hot'"
     ).fetchone()
     assert rows == (1,)
+
+
+def test_separate_registry_connections_serialize_same_key(tmp_path):
+    """BEGIN IMMEDIATE serializes two registry instances on one database file."""
+    import threading
+
+    first = _registry(tmp_path)
+    second = _registry(tmp_path)
+    barrier = threading.Barrier(2)
+    results: list = []
+    lock = threading.Lock()
+
+    def worker(reg: ExecutionRegistry, call_id: str) -> None:
+        barrier.wait()
+        result = _admit(reg, execution_id="exec-shared", call_id=call_id)
+        with lock:
+            results.append(result.status)
+
+    threads = [
+        threading.Thread(target=worker, args=(first, "call-a")),
+        threading.Thread(target=worker, args=(second, "call-b")),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert results.count(AdmissionStatus.ADMITTED) == 1
+    assert results.count(AdmissionStatus.REPLAY_IN_FLIGHT) == 1
+    first.close()
+    second.close()
