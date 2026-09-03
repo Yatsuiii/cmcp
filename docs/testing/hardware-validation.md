@@ -366,6 +366,53 @@ was therefore anchored on the leaf itself, which exercises the verifier's plumbi
 but proves **no key provenance**. Chained verification against a vendor root still
 needs a host of the other hierarchy, or the root from #453.
 
+## PolicyNV-gated signing lifecycle, AMD firmware TPM, 2026-09-03
+
+Evidence: a live run of
+`tests/integration/test_policynv_signing_key_lifecycle.py` against the development
+host's `/dev/tpmrm0`. The device reports TPM 2.0 revision 1.59,
+`TPM2_PT_MANUFACTURER = AMD`, firmware `0x00060016` / `0x00000007`, and
+`TPMA_MODES_FIPS_140_2`. tpm2-tools 5.8 addressed the device TCTI directly. The
+unprivileged development user is not in the device's `tss` group, so this run
+delegated `/dev/tpmrm0` to a local no-network container; the TPM commands and
+state transitions were otherwise the same as this direct reproduction command:
+
+```sh
+CMCP_TPM_POLICY_TCTI=device:/dev/tpmrm0 \
+CMCP_TPM_POLICY_NV_INDEX=0x01504362 \
+pytest -q tests/integration/test_policynv_signing_key_lifecycle.py::test_real_tpm_policynv_gates_the_preloaded_signing_key_lifecycle
+```
+
+The test refuses cMCP's production index `0x01500432`, first proves the requested
+test handle does not exist, and undefines only the handle it created. A separate
+read after the run returned `TPM_RC_HANDLE` (`0x18b`), confirming cleanup. If a
+run is killed after the define but before cleanup, the operator must inspect the
+public area and explicitly remove the chosen test handle before retrying; the
+test never treats an existing handle as its own.
+
+The following lifecycle passed on both this hardware and an isolated swtpm 0.10.1:
+
+- seed a 32-byte `TPM_NT_EXTEND` index and predict
+  `post = SHA256(pre || gateway_digest)`;
+- derive an equality `TPM2_PolicyNV` digest for that predicted value;
+- create and load a TPM-resident P-256/ECDSA signing object carrying that
+  `authPolicy`, and read its public area while the index still holds `pre`;
+- observe `TPM2_PolicyNV` and `TPM2_Sign` refusal before the measurement extend;
+- extend the gateway digest, sign successfully under the satisfied policy, and
+  verify the resulting ECDSA/SHA-256 signature outside the TPM; and
+- extend a different value and observe signing refusal again.
+
+Both focused runs reported `1 passed`: swtpm in 1.34 seconds and the AMD firmware
+TPM in 4.50 seconds.
+
+This validates the TPM ordering and authorization mechanism, not the cMCP P3
+feature. The current TRACE signing path requires Ed25519, and this revision-1.59
+TPM exposes RSA and conventional ECC signing but no EdDSA. A TPM-resident P-256
+key therefore cannot replace `cmcp_runtime.audit.keys.SigningKey` without a claim
+and verifier algorithm-profile change. The run also does not prove sealed-blob
+persistence across a host reboot, endorsement-key provenance for the new signing
+object, or a gateway serving traffic with the key.
+
 ## Not yet validated
 
 - **TPM certificate chain on every Azure host**: the AK signature is verified, and

@@ -109,7 +109,26 @@ quote-specific and is not used to appraise an NV certification.
 
 **What P2 still does not give you.** `verified=True` requires a complete relying-party policy, including an expected digest; collector-claimed metadata cannot substitute for one. The result does not prove that the measured inputs are safe, that the pre-value has an approved history, that the index was never redefined, or that the evidence is current beyond its binding to the caller-supplied transcript nonce. Deciding the approved digest for a release is a release-engineering question, not a TPM one. Transporting the startup pair in a signed claim, binding it to a relying-party protocol, and defining policy-reload behavior remain separate integration work.
 
-**P3. Seal the TRACE signing key (attestation.md 4.2).** Implement the documented Phase 2 design over the P2 policy, so a modified gateway cannot unseal the key that signs claims. This is what converts measurement into enforcement.
+**P3. Policy-gate the TRACE signing key (attestation.md 4.2, #462).** The P2
+measurement and the signing key do not form an ordering cycle. `TPM2_Create` and
+`TPM2_Load` do not require the object's `authPolicy` to be satisfied, so startup
+can load the provisioned object blobs and read the public area before measuring
+the gateway. It can derive the key-binding nonce, certify and extend the measurement
+index, and only then satisfy `TPM2_PolicyNV` to authorize signing. The TPM tier
+already retains a random second half in that nonce, including when the public key
+is long-lived, so a separate freshness token and envelope field add no property
+and are not part of this design.
+
+The lifecycle mechanism is validated by
+`tests/integration/test_policynv_signing_key_lifecycle.py` against both swtpm and a
+real AMD firmware TPM: the public area is readable before the expected NV value,
+signing is denied before it, accepted at it, and denied after another extend.
+That test uses a TPM-resident P-256/ECDSA key. It does **not** close P3: cMCP's
+TRACE claim model and verifier are Ed25519-only, while the validated TPM 2.0
+revision 1.59 exposes no EdDSA signing algorithm. Sealing an Ed25519 seed as data
+would preserve the wire algorithm but export the private seed into host process
+memory after unseal, losing per-signature TPM authorization. The signing-algorithm
+profile is therefore a blocking design decision, not an implementation detail.
 
 **P4. Ship the TCG event log (#433).** Collect and replay it so evidence is interpretable and policy can name specific components.
 

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added a live PolicyNV signing-key lifecycle proof for #462. The same opt-in
+  integration test now passes against an isolated swtpm and a real AMD firmware
+  TPM: the TPM-resident public key is readable before the gateway-measurement
+  extend, signing is refused before the authorized NV value, succeeds at exactly
+  that value, and is refused again after the index moves. This is a mechanism
+  proof, not the P3 runtime implementation: deployed TPM 2.0 revision 1.59 exposes
+  P-256/ECDSA while cMCP's TRACE signing path is Ed25519-only, so the algorithm
+  profile must be resolved before the TPM key can replace `SigningKey`.
+
 ## [0.4.1] - 2026-09-02
 
 **Anyone running 0.4.0 should upgrade.** On 0.4.0 `verify_gateway_measurement()` could return
