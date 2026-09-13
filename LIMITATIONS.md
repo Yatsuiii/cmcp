@@ -67,6 +67,15 @@ The TEE prevents plaintext from leaving the enclave to any destination not cover
 **Tool name collision via malicious catalog entries**
 The catalog binds each tool name to a specific upstream server identity, which prevents routing ambiguity for approved servers. It does not prevent a typosquatted or look-alike package from being added to the catalog in the first place. Catalog approval is human-gated. The gateway trusts the catalog; it cannot detect that a catalog entry was added via a compromised reviewer or a social engineering attack.
 
+**Session cleanup is bounded by cooperation and by time**
+Session-scoped resources, meaning the stdio child, the pooled HTTP clients, and the provenance and drift caches, are released on every path that ends a session: `POST /sessions/{id}/close`, `POST /sessions/{id}/reset`, and graceful shutdown. None of those paths released anything before this was implemented, so the first three limits below are what remains rather than what was added. The last two are deliberate trades the behaviour introduces.
+
+- **A pooled HTTP client that fails to close leaks its connections.** `AsyncClient` marks itself closed, and HTTPcore empties its pool, before the underlying streams are released, so nothing a retry could reach survives a failed close. The client is dropped so the successor cannot reuse it, and the failure is logged. A child process that fails to close is retained instead, and a close retry can still reap it.
+- **Graceful shutdown can outlast a deployment's termination grace period.** It waits for any in-flight close, then drains again on the same budget, so with the defaults cleanup can begin as late as seventy seconds in. A shorter grace period ends in SIGKILL and none of this runs. Size the grace period above twice `CMCP_SESSION_CLOSE_DRAIN_SECONDS`, or lower that deadline.
+- **Cancellation is cooperative, so a failed drain does not prove a call stopped.** Close requests cancellation at the deadline and allows a further five seconds to unwind. A call that does not honour it leaves the drain incomplete, which seals admission rather than signing a claim that omits an outcome.
+- **A failed terminal audit write leaves the session unavailable, with no repair.** A deliberate trade: it blocks signing, rotation, reset, and further admission for that session, because the alternative is a signed claim missing a call the gateway made. Restoring the writer does not reconstruct the missing outcome, and none is provided. Recovery is a new session.
+- **A close that trips the kill switch leaves the gateway with no live session.** Also deliberate. The claim for the closed session is signed and retrievable, but no successor can be created until an operator unblocks that agent identity. This is the kill switch working as specified, at the cost of availability.
+
 ## What Level 0 (CMCP_DEV_MODE) does not provide
 
 `CMCP_DEV_MODE=1` uses a software-only TEE provider. It is suitable for development, testing, and demo scenarios. It does not satisfy production governance requirements because:
