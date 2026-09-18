@@ -171,6 +171,7 @@ _KNOWN_TOP_KEYS = {
     "policy_reload_interval_seconds",
     "audit_db_path",
     "conformance_profile",
+    "session_state_path",
 }
 
 # #495: catalog identity and routing are immutable for the process lifetime.
@@ -489,8 +490,12 @@ def load_config(path: str) -> Config:
     policy_bundle_path = raw.get("policy_bundle_path", "policy/")
     catalog_path = raw.get("catalog_path", "catalog.json")
     audit_db_path = raw.get("audit_db_path", "audit.db")
-    session_state_path = raw.get("session_state_path") or None
+    session_state_path = raw.get("session_state_path")
     if session_state_path is not None:
+        if not isinstance(session_state_path, str):
+            raise ConfigError("session_state_path must be a string")
+        if not session_state_path.strip():
+            raise ConfigError("session_state_path must not be empty or whitespace only")
         _check_no_traversal("session_state_path", session_state_path)
     _check_no_traversal("policy_bundle_path", policy_bundle_path)
     _check_no_traversal("catalog_path", catalog_path)
