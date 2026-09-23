@@ -133,11 +133,11 @@ class Config:
     max_response_size_bytes: int = 2 * 1024 * 1024  # 2MB
     policy_reload_interval_seconds: int = 0  # 0 = disabled (POLICY-001)
     audit_db_path: str = "audit.db"  # AUDIT-001: durable audit chain storage
-    #: Path to the shared session-state database. Unset keeps the accumulated
-    #: session-sensitivity value in the gateway process, which is correct for a
-    #: single instance and loses the value on restart. Set it to a path on a
-    #: volume every instance shares to make the ratchet hold per session across
-    #: instances and survive a restart. See ``session/store.py``.
+    #: Path to the SQLite session-state database. When configured, startup opens
+    #: this store and connects it to the gateway. Unset keeps the accumulated
+    #: session-sensitivity value in process-local memory. Configuring this store
+    #: does not restore the same logical session after restart or across
+    #: instances; authenticated session resumption remains tracked in #653.
     session_state_path: str | None = None
     dev_mode: bool = False
     bearer_token: str | None = None
