@@ -1,4 +1,10 @@
-"""Independent sink observations and deliberately weakened synthetic controls."""
+"""Independent sink observations and deliberately weakened synthetic controls.
+
+The fixture observes synthetic tool delivery and specific canary escape probes:
+parent IPv4/IPv6 TCP, UDP/DNS, child IPv4 TCP, a file write and container logs.
+These provide generic analogues for docs/confinement.md's illustrative path set,
+not evidence of order_create execution, deployment-side coverage or completeness.
+"""
 
 import asyncio
 import json
@@ -141,6 +147,10 @@ async def run_case(tmp_path, monkeypatch, *, mutation=None, mode="normal", unava
 
 
 async def test_confinement_and_fresh_restart(tmp_path, monkeypatch):
+    """Observe permitted synthetic delivery and the tested escape probes.
+
+    This is a generic P1 analogue, not an order_create or completeness test.
+    """
     for _ in range(2):
         observation, stats, refused = await run_case(tmp_path, monkeypatch)
         assert not refused
@@ -161,6 +171,12 @@ async def test_live_operator_policy_restricts_and_restores_without_label_reset(t
 
 @pytest.mark.parametrize("mutation", ["network", "filesystem", "logging", "sink"])
 async def test_removed_restriction_is_detected_at_independent_sink(tmp_path, monkeypatch, mutation):
+    """Compare deliberately weakened controls with baseline canary observations.
+
+    Network and filesystem mutations exercise specific P2/P3 analogues. Logging
+    and sink mutations are separate confinement checks. These observations show
+    sensitivity to removed controls, not complete effect-path coverage.
+    """
     observation, _, refused = await run_case(tmp_path, monkeypatch, mutation=mutation)
     assert not refused
     assert observation["permitted"] == 1
