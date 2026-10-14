@@ -178,31 +178,99 @@ def load_agent_manifest(path: str) -> dict[str, Any]:
     return load_agent_manifest_document(path).manifest
 
 
-def load_agent_manifest_trust_anchor(path: str) -> dict[str, bytes]:
-    """Load issuer public keys from a JSON trust anchor file."""
+# SPIFFE ID grammar (SPIFFE ID specification, section 2): a non-empty trust
+# domain of lowercase letters, digits, ".", "-" and "_", with no userinfo, port,
+# query or fragment, then optional path segments of letters, digits, ".", "-"
+# and "_", none empty, "." or "..".
+_SPIFFE_SCHEME = "spiffe://"
+_SPIFFE_TRUST_DOMAIN = re.compile(r"[a-z0-9._-]{1,255}")
+_SPIFFE_PATH_SEGMENT = re.compile(r"[A-Za-z0-9._-]+")
+_MAX_SPIFFE_ID_BYTES = 2048
+
+
+def _is_spiffe_id(value: object) -> bool:
+    """Whether *value* is a well-formed SPIFFE ID."""
+    if not isinstance(value, str) or not value.startswith(_SPIFFE_SCHEME):
+        return False
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        # A lone surrogate survives json.loads but is not a SPIFFE ID.
+        return False
+    if len(encoded) > _MAX_SPIFFE_ID_BYTES:
+        return False
+    trust_domain, has_path, path = value[len(_SPIFFE_SCHEME) :].partition("/")
+    if not _SPIFFE_TRUST_DOMAIN.fullmatch(trust_domain):
+        return False
+    if not has_path:
+        return True
+    return all(
+        _SPIFFE_PATH_SEGMENT.fullmatch(segment) and segment not in {".", ".."}
+        for segment in path.split("/")
+    )
+
+
+def load_agent_manifest_trust_policy(
+    path: str,
+) -> tuple[dict[str, bytes], dict[str, list[str]] | None]:
+    """Load a trust anchor's keys and its issuer policy (spec 5.3.3) in one parse.
+
+    Each key is ``public_key_base64url`` with an optional ``key_id`` and an
+    optional ``issuers`` list of SPIFFE IDs that key may sign for, in the
+    single-key form or on each entry of ``keys[]``. A key with no ``issuers``
+    is authorized for no issuer.
+
+    The policy is None when no key in the file declares ``issuers``, which is
+    a trust anchor written before issuer authorization existed. The binding
+    refuses that rather than reading it as "any issuer". A repeated key_id or
+    a malformed issuer is a ConfigError, so neither can enter the policy.
+    """
     try:
         with Path(path).open() as f:
             raw = json.load(f)
     except (OSError, json.JSONDecodeError) as exc:
         raise ConfigError(f"Cannot read Agent Manifest trust anchor: {exc}") from exc
 
-    anchors: dict[str, bytes] = {}
     if isinstance(raw, dict) and "public_key_base64url" in raw:
-        public_key = _b64url_decode(str(raw["public_key_base64url"]))
-        key_id = str(raw.get("key_id") or _key_id(public_key))
+        entries = [raw]
+    elif isinstance(raw, dict) and isinstance(raw.get("keys"), list):
+        entries = raw["keys"]
+    else:
+        raise ConfigError(
+            "Agent Manifest trust anchor must contain public_key_base64url or keys[]"
+        )
+
+    anchors: dict[str, bytes] = {}
+    policy: dict[str, list[str]] = {}
+    declared = False
+    for item in entries:
+        if not isinstance(item, dict):
+            raise ConfigError("Agent Manifest trust anchor keys must be objects")
+        public_key = _b64url_decode(str(item.get("public_key_base64url", "")))
+        key_id = str(item.get("key_id") or _key_id(public_key))
+        if key_id in anchors:
+            raise ConfigError(f"Agent Manifest trust anchor repeats key_id {key_id!r}")
         anchors[key_id] = public_key
-        return anchors
-    if isinstance(raw, dict) and "keys" in raw and isinstance(raw["keys"], list):
-        for item in raw["keys"]:
-            if not isinstance(item, dict):
-                raise ConfigError("Agent Manifest trust anchor keys must be objects")
-            public_key = _b64url_decode(str(item.get("public_key_base64url", "")))
-            key_id = str(item.get("key_id") or _key_id(public_key))
-            anchors[key_id] = public_key
-        return anchors
-    raise ConfigError(
-        "Agent Manifest trust anchor must contain public_key_base64url or keys[]"
-    )
+        if "issuers" not in item:
+            continue
+        declared = True
+        issuers = item["issuers"]
+        if not isinstance(issuers, list) or not all(_is_spiffe_id(i) for i in issuers):
+            raise ConfigError(
+                "Agent Manifest trust anchor issuers must be a list of SPIFFE IDs"
+            )
+        policy[key_id] = list(issuers)
+    return anchors, (policy if declared else None)
+
+
+def load_agent_manifest_trust_anchor(path: str) -> dict[str, bytes]:
+    """Load issuer public keys from a JSON trust anchor file."""
+    return load_agent_manifest_trust_policy(path)[0]
+
+
+def load_agent_manifest_issuer_policy(path: str) -> dict[str, list[str]] | None:
+    """Load which issuers each trust-anchor key may sign for (spec 5.3.3)."""
+    return load_agent_manifest_trust_policy(path)[1]
 
 
 # A revocation list is operator-supplied, so it is bounded the same way the
@@ -318,6 +386,11 @@ def _raise_for_sdk_result(result: Any, *, require_runtime_artifacts: bool) -> No
     # as "tool_manifest.catalog_hash"; to an operator it is the same failure.
     if mismatch_fields & {"tool_manifest", "tool_manifest.catalog_hash"}:
         raise ConfigError("Agent Manifest tool catalog hash does not match runtime catalog")
+    if "signature.issuer" in mismatch_fields:
+        raise ConfigError(
+            "Agent Manifest signing key is not authorized for the manifest issuer "
+            "(spec 5.3.3)"
+        )
     if "signature" in mismatch_fields:
         raise ConfigError("Agent Manifest signature verification failed")
     if result.result == agent_manifest_sdk.OverallResult.REVOKED:
@@ -354,6 +427,7 @@ def _verify_with_sdk(
     envelope: bytes | None = None,
     revocations: Any = None,
     runtime_catalog: ToolCatalog | None = None,
+    trusted_key_issuers: dict[str, list[str]] | None = None,
 ) -> str | None:
     """Appraise the manifest; return the COSE signer's key id when there is exactly one."""
     sealed_catalog_hash = tool_catalog_hash
@@ -400,6 +474,7 @@ def _verify_with_sdk(
                 else None
             ),
             trusted_keys=_trusted_keys_for_sdk(trusted_keys),
+            trusted_key_issuers=trusted_key_issuers,
             # The gateway performs a deliberately scoped appraisal. It holds the
             # running policy bundle and tool catalog and verifies those two
             # bindings; it does not hold the agent's system prompt or model
@@ -591,6 +666,7 @@ def verify_agent_manifest_binding(
     envelope: bytes | None = None,
     revocations: Any = None,
     runtime_catalog: ToolCatalog | None = None,
+    trusted_key_issuers: dict[str, list[str]] | None = None,
 ) -> AgentManifestBinding:
     """Verify manifest signature and bind it to runtime session inputs.
 
@@ -611,7 +687,19 @@ def verify_agent_manifest_binding(
     manifest does not bind.
     The experimental evidence-requirements profile always binds this way and
     must also sign the sealed digest.
+
+    *trusted_key_issuers* maps each trusted key_id to the issuers it may sign
+    for (load_agent_manifest_trust_policy). It is required: spec 5.3.3 forbids
+    a VALID manifest whose signing key has not been authorized for its declared
+    issuer, so a binding without the policy is refused rather than accepted on
+    the signature alone.
     """
+    if trusted_key_issuers is None:
+        raise ConfigError(
+            "Agent Manifest trust anchor authorizes no issuer: add an issuers list "
+            "to each key so the signing key can be authorized for the manifest "
+            "issuer (spec 5.3.3)"
+        )
     manifest_id, agent_id, issuer, key_id, manifest_policy, manifest_catalog = (
         _manifest_binding_fields(manifest)
     )
@@ -633,6 +721,7 @@ def verify_agent_manifest_binding(
         envelope=envelope,
         revocations=revocations,
         runtime_catalog=runtime_catalog,
+        trusted_key_issuers=trusted_key_issuers,
     )
     # A v0.2 manifest has no detached signature block; its signer is the key
     # that verified the COSE envelope.
