@@ -4,9 +4,7 @@
 
 | Name | GitHub | Affiliation | Role |
 |------|--------|-------------|------|
-| Imran Siddique | @imran-siddique | OPAQUE Systems | Project Lead |
-| Rishabh Poddar | @podcastinator | OPAQUE Systems | Maintainer |
-| Aaron Fulkerson | @AaronRoeF | OPAQUE Systems | Maintainer |
+| Imran Siddique | @imran-siddique | AgenTrust-io | Project Lead |
 
 The Project Lead has final decision authority on architecture, conformance
 requirements, and Maintainer appointments.
@@ -38,6 +36,11 @@ To be considered for maintainer status you must:
 
 Maintainers who are no longer active may move to emeritus status. Emeritus maintainers are listed here for recognition but do not hold merge rights or voting privileges.
 
+| Name | GitHub |
+|---|---|
+| Rishabh Poddar | @podcastinator |
+| Aaron Fulkerson | @AaronRoeF |
+
 ## Changes to This File
 
 Changes to MAINTAINERS.md must be approved by at least one existing maintainer.
@@ -52,3 +55,9 @@ Changes to MAINTAINERS.md must be approved by at least one existing maintainer.
 | Rajnish Tiwari | [@rajnisht7](https://github.com/rajnisht7) | [Project Lead announcement](https://github.com/orgs/agentrust-io/discussions/40) |
 
 These appointments cover this repository. CODEOWNERS determines which paths each reviewer can approve for protected merges.
+
+## Reviewers
+
+| Name | GitHub | Since |
+|---|---|---|
+| Noah Ingwers | [@noah-ing](https://github.com/noah-ing) | 2026-10-14, [accepted](https://github.com/agentrust-io/.github/issues/60#issuecomment-6179377337) |
