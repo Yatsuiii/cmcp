@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **The operator token was measured.** Only the bearer token was excluded from
+  the measured configuration, so `CMCP_OPERATOR_TOKEN` fed the gateway digest
+  (since #629): rotating it changed the digest, and a digest over it reached the
+  measurement index and, on `sev-snp`, `tdx` and `azure-cvm-sev-snp`, the report
+  nonce. A verifier recomputing an expected digest also needed the production
+  token. The configuration digest changes once for every deployment, since the
+  field leaves the measured payload. A deployment that used a low-entropy
+  operator token should rotate it after upgrading.
+
 ### Removed
 
 - The `opaque` attestation provider and its verifier. `cmcp_runtime.tee.opaque`
