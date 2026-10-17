@@ -77,6 +77,7 @@ _TPM_EO_EQ = 0x0000
 #: code without the format-one parameter, handle or session number.
 _TPM_RC_POLICY = 0x126
 _TPM_RC_POLICY_FAIL = 0x09D
+_TPM_RC_HANDLE = 0x08B
 
 
 class SealedKeyError(CMCPError):
@@ -386,19 +387,34 @@ def _is_policy_refusal(exc: Exception) -> bool:
     blob's. Any other failure is the TPM failing, not a mismatch, and reporting it
     as one would send an operator to reseal for nothing.
     """
+    return _tpm_error(exc) in (_TPM_RC_POLICY, _TPM_RC_POLICY_FAIL)
+
+
+def _tpm_error(exc: Exception) -> int | None:
+    """The TPM response code tpm2-pytss attached to ``exc``, or None if it has none."""
     error = getattr(exc, "error", None)
     try:
-        return error is not None and int(error) in (_TPM_RC_POLICY, _TPM_RC_POLICY_FAIL)
+        return None if error is None else int(error)
     except (TypeError, ValueError):
-        return False
+        return None
 
 
 def _gate_handle(ectx: Any, index: int) -> Any | None:
+    """The gate's handle, or None when the TPM says the index is not defined.
+
+    Only ``TPM_RC_HANDLE`` means that. A TPM that fails to answer is not a TPM
+    without a gate: reading it as one would report SEALED_KEY_TPM_CHANGED, whose
+    remedy is a new key, for a TPM that is only unavailable.
+    """
     try:
         return ectx.tr_from_tpmpublic(index)
-    except Exception as exc:  # noqa: BLE001 - an undefined index is expected
-        logger.debug("gate NV index %#x is not defined: %s", index, exc)
-        return None
+    except Exception as exc:  # noqa: BLE001
+        if _tpm_error(exc) == _TPM_RC_HANDLE:
+            logger.debug("gate NV index %#x is not defined: %s", index, exc)
+            return None
+        raise SealedKeyUnavailable(
+            "the gate NV index could not be read", detail=f"index={index:#x}: {exc}"
+        ) from exc
 
 
 def _check_gate(ectx: Any, handle: Any, index: int) -> None:

@@ -353,6 +353,23 @@ def test_a_tpm_failure_during_the_unseal_is_not_reported_as_a_mismatch(
     assert _gate_value(tpm) == GATE_SENTINEL
 
 
+def test_a_tpm_that_stops_answering_is_unavailable_not_changed(
+    tpm: Swtpm, store: SealedKeyStore
+) -> None:
+    """Only TPM_RC_HANDLE means there is no gate. A TPM that fails is not a cleared one,
+    and SEALED_KEY_TPM_CHANGED would send the operator to rotate a key that is fine."""
+    public_key = _open(tpm, store, DIGEST_A).public_key
+    ectx = tpm.context()
+    tpm.stop()
+    with pytest.raises(SealedKeyUnavailable, match="gate NV index could not be read"):
+        seal.open_sealed_key(ectx, store, DIGEST_A)
+    with pytest.raises(SealedKeyUnavailable, match="gate NV index could not be read"):
+        seal.rotate_sealed_key(ectx, store, DIGEST_A)
+    ectx.close()
+    tpm.start()
+    assert _open(tpm, store, DIGEST_A).public_key == public_key
+
+
 def test_rotation_after_tpm2_clear_defines_a_new_gate(tpm: Swtpm, store: SealedKeyStore) -> None:
     """The documented recovery: the old key is gone with the TPM's seeds, rotation mints one."""
     from tpm2_pytss.constants import ESYS_TR
