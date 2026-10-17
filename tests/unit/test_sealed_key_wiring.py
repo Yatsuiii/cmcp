@@ -91,3 +91,55 @@ def test_reseal_after_reload_is_a_no_op_without_a_sealed_key() -> None:
     from cmcp_runtime.tee.seal import reseal_after_reload
 
     assert reseal_after_reload(SimpleNamespace(sealed_key=None, gateway_measurement=None)) is False
+
+
+def _cli(*args: str) -> object:
+    from click.testing import CliRunner
+
+    from cmcp_runtime.cli import main
+
+    return CliRunner().invoke(main, list(args))
+
+
+def test_measure_prints_the_gateway_digest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+
+    monkeypatch.setattr(measurement, "code_digest", lambda: "c" * 64)
+    (tmp_path / "policies").mkdir()
+    (tmp_path / "policies" / "a.cedar").write_text("permit(principal, action, resource);")
+    config_path = tmp_path / "cmcp-config.yaml"
+    config_path.write_text(f"policy_bundle_path: {tmp_path / 'policies'}\n")
+    expected = measurement.gateway_measurement(load_config(str(config_path)))
+
+    plain = _cli("measure", "--config", str(config_path))
+    assert plain.exit_code == 0, plain.output
+    assert plain.output.splitlines()[0] == expected.digest_hex
+    as_json = json.loads(_cli("measure", "--config", str(config_path), "--json").output)
+    assert as_json == {"digest": expected.digest_hex, "components": expected.components}
+
+
+def test_key_commands_refuse_when_sealing_is_off(tmp_path: Path) -> None:
+    config_path = _config(tmp_path, "  provider: tpm\n")
+    result = _cli("key", "public", "--config", str(config_path))
+    assert result.exit_code == 1
+    assert "seal_signing_key is off" in result.output
+
+
+def test_key_public_before_the_first_start(tmp_path: Path) -> None:
+    config_path = _config(
+        tmp_path,
+        f"  provider: tpm\n  seal_signing_key: true\n  sealed_key_dir: {tmp_path / 's'}\n",
+    )
+    result = _cli("key", "public", "--config", str(config_path))
+    assert result.exit_code == 1
+    assert "first start provisions" in result.output
+
+
+@pytest.mark.parametrize("value", ["zz", "sha256:" + "ab" * 16])
+def test_a_malformed_digest_is_a_usage_error(tmp_path: Path, value: str) -> None:
+    config_path = _config(
+        tmp_path,
+        f"  provider: tpm\n  seal_signing_key: true\n  sealed_key_dir: {tmp_path / 's'}\n",
+    )
+    result = _cli("key", "reseal", "--config", str(config_path), "--to-digest", value)
+    assert result.exit_code == 2

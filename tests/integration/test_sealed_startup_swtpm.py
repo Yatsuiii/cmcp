@@ -190,3 +190,63 @@ def test_sealing_needs_the_tpm_provider_named_explicitly(tmp_path: Path) -> None
     config_path.write_text("attestation:\n  seal_signing_key: true\n")
     with pytest.raises(ConfigError, match="provider: tpm"):
         load_config(str(config_path))
+
+
+# The operator commands, through click, against the same routed swtpm.
+
+
+def _cli(*args: str) -> object:
+    from click.testing import CliRunner
+
+    from cmcp_runtime.cli import main
+
+    return CliRunner().invoke(main, list(args), catch_exceptions=False)
+
+
+def test_resealing_before_an_upgrade_keeps_the_key_and_rollback_works(
+    tpm: Swtpm, tmp_path: Path
+) -> None:
+    config_path = _gateway(tmp_path)
+    first = _start(config_path)
+    public_key = first.signing_key.public_key_bytes
+    _stop(first)
+
+    allow = tmp_path / "policy" / "allow.cedar"
+    original = allow.read_text()
+    allow.write_text("permit(principal, action, resource) when { 1 == 1 };")
+    result = _cli("key", "reseal", "--config", str(config_path))
+    assert result.exit_code == 0, result.output
+    assert _cli("key", "public", "--config", str(config_path)).output.strip() == public_key.hex()
+
+    upgraded = _start(config_path)
+    assert upgraded.signing_key.public_key_bytes == public_key
+    _stop(upgraded)
+
+    allow.write_text(original)
+    rolled_back = _start(config_path)
+    assert rolled_back.signing_key.public_key_bytes == public_key
+    _stop(rolled_back)
+
+
+def test_rotating_replaces_the_key_on_purpose(tpm: Swtpm, tmp_path: Path) -> None:
+    config_path = _gateway(tmp_path)
+    first = _start(config_path)
+    _stop(first)
+
+    result = _cli("key", "rotate", "--config", str(config_path), "--yes")
+    assert result.exit_code == 0, result.output
+    rotated = _cli("key", "public", "--config", str(config_path)).output.strip()
+    assert rotated != first.signing_key.public_key_bytes.hex()
+
+    after = _start(config_path)
+    assert after.signing_key.public_key_bytes.hex() == rotated
+    _stop(after)
+
+
+def test_the_commands_refuse_while_a_gateway_holds_the_key(tpm: Swtpm, tmp_path: Path) -> None:
+    config_path = _gateway(tmp_path)
+    running = _start(config_path)
+    result = _cli("key", "reseal", "--config", str(config_path))
+    assert result.exit_code == 1
+    assert "SEALED_KEY_LOCKED" in result.output
+    _stop(running)

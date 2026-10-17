@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import io
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import click
 
@@ -394,3 +394,154 @@ def validate_bundle(bundle_path: str, expected_hash: str) -> None:
             err=True,
         )
         raise SystemExit(1)
+
+
+def _parse_digest(value: str) -> bytes:
+    """A gateway digest as ``sha256:<hex>`` or bare hex, 32 bytes."""
+    try:
+        digest = bytes.fromhex(value.removeprefix("sha256:"))
+    except ValueError as exc:
+        raise click.BadParameter(f"not hex: {value!r}") from exc
+    if len(digest) != 32:
+        raise click.BadParameter("a gateway digest is 32 bytes")
+    return digest
+
+
+def _current_digest(config_path: str) -> bytes:
+    from cmcp_runtime.config import load_config
+    from cmcp_runtime.tee.measurement import gateway_measurement
+
+    return gateway_measurement(load_config(config_path)).digest
+
+
+@main.command()
+@click.option("--config", required=True, type=click.Path(exists=True), help="Path to cmcp-config.yaml")
+@click.option("--json", "as_json", is_flag=True, help="Print the digest and its components as JSON.")
+def measure(config: str, as_json: bool) -> None:
+    """Print the gateway digest for this installation, policy bundle and config.
+
+    Run it from the installation that will run, with the environment the gateway
+    starts with: the code digest covers the installed package, and some effective
+    settings depend on CMCP_DEV_MODE and on whether CMCP_BEARER_TOKEN is set.
+    """
+    import json
+
+    from cmcp_runtime.config import load_config
+    from cmcp_runtime.tee.measurement import gateway_measurement
+
+    try:
+        measured = gateway_measurement(load_config(config))
+    except Exception as exc:
+        click.echo(f"{_bad()} Cannot measure: {exc}", err=True)
+        raise SystemExit(1) from exc
+    if as_json:
+        click.echo(json.dumps({"digest": measured.digest_hex, "components": measured.components}))
+        return
+    click.echo(measured.digest_hex)
+    for name in ("code", "policy", "config"):
+        click.echo(f"  {name:6} {measured.components[name]}")
+
+
+@main.group()
+def key() -> None:
+    """Manage the sealed TRACE signing key (attestation.seal_signing_key, TPM tier)."""
+
+
+def _sealed_store(config_path: str) -> Any:
+    from cmcp_runtime.config import load_config
+    from cmcp_runtime.tee.seal import SealedKeyStore
+
+    try:
+        loaded = load_config(config_path)
+    except Exception as exc:
+        click.echo(f"{_bad()} Config invalid: {exc}", err=True)
+        raise SystemExit(1) from exc
+    if not loaded.attestation.seal_signing_key:
+        click.echo(f"{_bad()} attestation.seal_signing_key is off in {config_path}", err=True)
+        raise SystemExit(1)
+    return SealedKeyStore(loaded.attestation.sealed_key_dir)
+
+
+def _with_tpm(store: Any, operation: Any) -> Any:
+    """Run ``operation(ectx)`` holding the store lock, so no gateway runs meanwhile."""
+    from cmcp_runtime.tee.seal import SealedKeyError
+
+    try:
+        from tpm2_pytss.ESAPI import ESAPI
+    except ImportError as exc:
+        click.echo(f"{_bad()} tpm2-pytss is required: pip install 'cmcp-runtime[tpm]'", err=True)
+        raise SystemExit(1) from exc
+    try:
+        lock = store.acquire()
+        try:
+            with ESAPI() as ectx:
+                return operation(ectx)
+        finally:
+            lock.release()
+    except SealedKeyError as exc:
+        detail = f" ({exc.detail})" if exc.detail else ""
+        click.echo(f"{_bad()} {exc.code}: {exc}{detail}", err=True)
+        raise SystemExit(1) from exc
+
+
+@key.command("public")
+@click.option("--config", required=True, type=click.Path(exists=True), help="Path to cmcp-config.yaml")
+def key_public(config: str) -> None:
+    """Print the sealed key's public half (hex), for `cmcp verify --trusted-key`."""
+    from cmcp_runtime.tee.seal import SealedKeyError, stored_public_key
+
+    try:
+        public_key = stored_public_key(_sealed_store(config))
+    except SealedKeyError as exc:
+        click.echo(f"{_bad()} {exc.code}: {exc}", err=True)
+        raise SystemExit(1) from exc
+    if public_key is None:
+        click.echo(f"{_bad()} No sealed key yet: the first start provisions one", err=True)
+        raise SystemExit(1)
+    click.echo(public_key.hex())
+
+
+@key.command("reseal")
+@click.option("--config", required=True, type=click.Path(exists=True), help="Path to cmcp-config.yaml")
+@click.option(
+    "--to-digest",
+    default=None,
+    help="Digest to seal to (sha256:<hex>). Default: what `cmcp measure` prints for --config here.",
+)
+def key_reseal(config: str, to_digest: str | None) -> None:
+    """Seal the same key to another gateway digest, before starting that gateway.
+
+    Run with the gateway stopped. It unseals the newest blob under its own digest,
+    which needs owner authorization on the TPM, and keeps the previous blob so a
+    rollback still starts.
+    """
+    from cmcp_runtime.tee.seal import reseal_stored_key
+
+    store = _sealed_store(config)
+    digest = _parse_digest(to_digest) if to_digest else _current_digest(config)
+    public_key = _with_tpm(store, lambda ectx: reseal_stored_key(ectx, store, digest))
+    click.echo(f"{_ok()} Resealed {public_key.hex()[:16]}... to sha256:{digest.hex()}")
+
+
+@key.command("rotate")
+@click.option("--config", required=True, type=click.Path(exists=True), help="Path to cmcp-config.yaml")
+@click.option(
+    "--to-digest",
+    default=None,
+    help="Digest to seal the new key to (sha256:<hex>). Default: this installation's.",
+)
+@click.option("--yes", is_flag=True, help="Replace the key without asking.")
+def key_rotate(config: str, to_digest: str | None, yes: bool) -> None:
+    """Replace the sealed key with a new one. Also the recovery for a lost store.
+
+    Claims from the old key still verify, but a relying party pinning it will
+    reject claims from the new one until it is told.
+    """
+    from cmcp_runtime.tee.seal import rotate_sealed_key
+
+    store = _sealed_store(config)
+    digest = _parse_digest(to_digest) if to_digest else _current_digest(config)
+    if not yes:
+        click.confirm("Replace the sealed signing key? Pinned verifiers must be updated", abort=True)
+    public_key = _with_tpm(store, lambda ectx: rotate_sealed_key(ectx, store, digest))
+    click.echo(f"{_ok()} New sealed key {public_key.hex()} sealed to sha256:{digest.hex()}")
