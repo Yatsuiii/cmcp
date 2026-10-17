@@ -88,6 +88,7 @@ import csv
 import hashlib
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib.metadata import Distribution, distributions
 from pathlib import Path
@@ -362,7 +363,9 @@ def _config_payload(value: Any, *, _depth: int = 0) -> Any:
             for name in sorted(value.__dataclass_fields__)
             if name not in _CONFIG_SECRET_KEYS
         }
-    if isinstance(value, dict):
+    # Mapping, not dict: config freezes some mappings in a MappingProxyType, and
+    # falling through to str() below would measure its insertion order.
+    if isinstance(value, Mapping):
         return {
             str(k): _config_payload(v, _depth=_depth + 1)
             for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))
