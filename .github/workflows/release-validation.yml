@@ -53,6 +53,43 @@ jobs:
         run: pytest tests/unit/ tests/conformance/ tests/integration/ tests/confinement/ -v --tb=short --cov=src --cov-report=xml
 
 
+  tpm:
+    # #462: the test job installs no tpm2-pytss, so nothing there imports the
+    # real TPM path. This job runs the sealed signing key against swtpm, then the
+    # whole suite with the library present, which is when tests/conftest.py has
+    # to keep it off any host TPM. Linux only, as the TPM tier is.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install swtpm and the TSS headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends swtpm swtpm-tools libtss2-dev pkg-config
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --require-hashes -r requirements/tpm.txt
+          python -m pip install --no-deps -e .
+
+      - name: Sealed signing key against swtpm
+        run: >-
+          pytest -v --tb=short
+          tests/unit/test_host_tpm_guard.py
+          tests/unit/test_sealed_key_store.py
+          tests/unit/test_sealed_key_wiring.py
+          tests/integration/test_sealed_signing_key_swtpm.py
+          tests/integration/test_sealed_startup_swtpm.py
+
+      - name: The suite with tpm2-pytss installed
+        run: pytest tests/unit/ tests/conformance/ tests/integration/ -q --tb=short
+
   governance:
     runs-on: ubuntu-latest
     needs: test
