@@ -33,6 +33,7 @@ import json
 import logging
 import os
 import struct
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -301,10 +302,9 @@ class SealedKeyStore:
         Two processes sharing one store would share one gate, and an interleaved
         open-unseal-close sequence lets one of them read the other's gate value.
         """
-        try:
-            import fcntl
-        except ImportError as exc:  # pragma: no cover - the TPM tier is Linux-only
-            raise SealedKeyUnavailable("sealing needs fcntl, so it is Linux-only") from exc
+        if sys.platform == "win32":  # also tells mypy fcntl below is POSIX-only
+            raise SealedKeyUnavailable("sealing needs fcntl, so it is Linux-only")
+        import fcntl
         try:
             self.directory.mkdir(parents=True, exist_ok=True)
             handle = open(self.lock_path, "w")  # noqa: SIM115 - held for the lock's lifetime
