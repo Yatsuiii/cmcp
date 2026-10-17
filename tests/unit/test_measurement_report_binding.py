@@ -786,13 +786,22 @@ def test_a_provider_returning_a_non_report_does_not_displace_the_good_one(
 
 
 def test_extend_degrades_when_tpm2_pytss_is_absent(
-    tmp_path: Path, stub_code: None
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_code: None
 ) -> None:
-    """tpm2-pytss is not installed in CI, so this is the branch that actually runs.
+    """The branch CI runs, since CI installs no tpm2-pytss.
+
+    The library is hidden rather than assumed absent: with the ``tpm`` extra
+    installed, this test would otherwise open the default TCTI and extend the
+    measurement index on whatever TPM the machine has.
 
     Dev mode turns the missing library into a warning; production would abort, which
     test_an_unmeasurable_gateway_aborts_startup_on_sev_snp covers for the other tier.
     """
+    import sys
+
+    monkeypatch.setitem(sys.modules, "tpm2_pytss", None)
+    monkeypatch.setitem(sys.modules, "tpm2_pytss.ESAPI", None)
+
     from cmcp_runtime.startup import _extend_measurement, _measure_gateway
 
     config = _Config(policy_bundle_path=_bundle(tmp_path, "permit(...);"), dev_mode=True)
