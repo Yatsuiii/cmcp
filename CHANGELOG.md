@@ -21,7 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   guarantee.
 - `cmcp measure` prints the gateway digest and its components. `cmcp key public`,
   `cmcp key reseal` and `cmcp key rotate` manage the sealed key.
-- A `tpm` extra for tpm2-pytss, and a CI job that runs the TPM tier against swtpm.
+- A `tpm` extra for tpm2-pytss. On Linux, CI's test job installs it and runs the
+  TPM tier against swtpm.
 
 ### Fixed
 
