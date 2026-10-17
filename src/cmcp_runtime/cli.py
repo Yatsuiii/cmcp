@@ -42,6 +42,23 @@ def _bad() -> str:
     return _marker("✗", "ERROR", sys.stderr)
 
 
+def _after_policy_reload(ctx: RuntimeContext) -> None:
+    """What a verified policy reload has to update outside the evaluator.
+
+    #552 re-attests on the providers that bind the measurement into report_data,
+    and #462 reseals the signing key to the new digest when it is sealed. Each is a
+    no-op where it does not apply. The reseal runs even if the re-attestation
+    raises, which the evaluator then logs.
+    """
+    from cmcp_runtime.tee.report_binding import refresh_measurement_binding
+    from cmcp_runtime.tee.seal import reseal_after_reload
+
+    try:
+        refresh_measurement_binding(ctx)
+    finally:
+        reseal_after_reload(ctx)
+
+
 def build_server(ctx: RuntimeContext, *, trace_gate: TraceGate | None = None) -> MCPServer:
     """
     Compose the running gateway from a validated RuntimeContext.
@@ -55,7 +72,6 @@ def build_server(ctx: RuntimeContext, *, trace_gate: TraceGate | None = None) ->
     from cmcp_runtime.mcp.server import MCPServer
     from cmcp_runtime.policy.evaluator import PolicyEvaluator
     from cmcp_runtime.session.manager import SessionManager
-    from cmcp_runtime.tee.report_binding import refresh_measurement_binding
 
     # Resolve provider string to canonical platform name for Cedar context.
     # Falls back to the raw provider string if not in the map (e.g. future providers).
@@ -82,7 +98,7 @@ def build_server(ctx: RuntimeContext, *, trace_gate: TraceGate | None = None) ->
     policy_evaluator = PolicyEvaluator(
         bundle=ctx.policy_bundle,
         config=ctx.config,
-        on_reload=lambda: refresh_measurement_binding(ctx),
+        on_reload=lambda: _after_policy_reload(ctx),
     )
     proxy = CMCPProxy(
         catalog=ctx.catalog,

@@ -479,7 +479,7 @@ def test_startup_binds_the_measurement_into_the_nonce_on_sev_snp(
     assert measurement is not None
 
     nonce = _attestation_nonce(
-        jwk_thumbprint(_KEY), _SigningKey(), provider, measurement
+        jwk_thumbprint(_KEY), _KEY, provider, measurement
     )
     assert nonce == jwk_thumbprint(_KEY) + gateway_measurement(config).digest
 
@@ -497,8 +497,8 @@ def test_startup_keeps_the_random_salt_on_the_tpm_tier(
     assert measurement is not None  # still measured, just committed elsewhere
 
     fingerprint = jwk_thumbprint(_KEY)
-    first = _attestation_nonce(fingerprint, _SigningKey(), provider, measurement)
-    second = _attestation_nonce(fingerprint, _SigningKey(), provider, measurement)
+    first = _attestation_nonce(fingerprint, _KEY, provider, measurement)
+    second = _attestation_nonce(fingerprint, _KEY, provider, measurement)
 
     assert first[:32] == fingerprint
     assert first != second  # the salt is random per call

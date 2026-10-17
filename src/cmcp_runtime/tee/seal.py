@@ -555,7 +555,12 @@ def _check_store_gate(contents: StoreContents, gate_index: int) -> None:
 
 
 def open_sealed_key(
-    ectx: Any, store: SealedKeyStore, digest: bytes, *, gate_index: int = DEFAULT_GATE_NV_INDEX
+    ectx: Any,
+    store: SealedKeyStore,
+    digest: bytes,
+    *,
+    gate_index: int = DEFAULT_GATE_NV_INDEX,
+    seed_if_new: bytes | None = None,
 ) -> OpenedKey:
     """Provision or unseal the signing key for a gateway whose digest is ``digest``.
 
@@ -563,6 +568,10 @@ def open_sealed_key(
     either a successful unseal or one of the distinct errors; nothing is minted to
     recover from them, because minting on a mismatch would hand a changed gateway a
     working key and sealing would enforce nothing.
+
+    ``seed_if_new`` is the seed to provision with. Startup passes one because the
+    public key goes into the attestation nonce before this runs; it is ignored
+    unless this call provisions.
     """
     contents = store.read()
     gate = _gate_handle(ectx, gate_index)
@@ -571,7 +580,9 @@ def open_sealed_key(
         gate = _define_gate(ectx, gate_index)
         _write_gate(ectx, gate, GATE_SENTINEL)
         _check_gate(ectx, gate, gate_index)
-        seed = os.urandom(SEED_SIZE)
+        seed = seed_if_new if seed_if_new is not None else os.urandom(SEED_SIZE)
+        if len(seed) != SEED_SIZE:
+            raise ValueError("an Ed25519 seed is 32 bytes")
         public_key = ed25519_public_key(seed)
         first = _seal(ectx, seed, digest, gate_index)
         store.write(StoreContents(gate_index, public_key, (first,)))
@@ -683,3 +694,97 @@ def rotate_sealed_key(
     store.write(StoreContents(gate_index, public_key, (_seal(ectx, seed, digest, gate_index),)))
     logger.info("Sealed signing key rotated: %s...", public_key.hex()[:16])
     return public_key
+
+
+# --- the running gateway ---------------------------------------------------------------
+
+
+class HeldSealedKey:
+    """The unsealed key for the life of a gateway process, and its store lock.
+
+    Keeps the seed so a verified policy reload can seal it to the new digest
+    without unsealing anything, and keeps the lock so no other process can open
+    the same gate while this one runs.
+    """
+
+    def __init__(
+        self,
+        store: SealedKeyStore,
+        lock: StoreLock,
+        opened: OpenedKey,
+        digest: bytes,
+        gate_index: int = DEFAULT_GATE_NV_INDEX,
+    ) -> None:
+        self.store = store
+        self.public_key = opened.public_key
+        self.provisioned = opened.provisioned
+        self.gate_index = gate_index
+        self.sealed_digest = digest
+        self._lock = lock
+        self._seed = opened.seed
+
+    @property
+    def seed(self) -> bytes:
+        return self._seed
+
+    def reseal(self, ectx: Any, digest: bytes) -> bool:
+        """Seal the held key to ``digest``. False when it already is."""
+        if digest == self.sealed_digest:
+            return False
+        reseal_held_key(ectx, self.store, self._seed, digest, gate_index=self.gate_index)
+        self.sealed_digest = digest
+        return True
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def __repr__(self) -> str:
+        return f"HeldSealedKey(public_key={self.public_key.hex()[:16]}..., store={self.store.path})"
+
+
+def reseal_after_reload(ctx: Any) -> bool:
+    """After a verified policy reload, seal the held key to the gateway's new digest.
+
+    ``ctx`` is a :class:`~cmcp_runtime.startup.RuntimeContext`, typed loosely to keep
+    this module free of an import cycle back through startup.
+
+    A reload that changes the bundle has passed the pinned signing key or the
+    pinned hash, and only then does the evaluator call back. The new digest takes
+    code and config from the startup measurement and recomputes only policy, so a
+    file changed on disk outside a reload is not sealed in. Returns True when a new
+    blob was written. A failure is logged and swallowed: the gateway keeps serving
+    with the key it holds, and the next start fails with
+    ``SEALED_KEY_DIGEST_MISMATCH`` until ``cmcp key reseal`` is run.
+    """
+    held = getattr(ctx, "sealed_key", None)
+    measured = getattr(ctx, "gateway_measurement", None)
+    if held is None or measured is None:
+        return False
+
+    from cmcp_runtime.tee.measurement import measurement_from_components, policy_digest
+
+    try:
+        digest = measurement_from_components(
+            {
+                "code": measured.components["code"],
+                "policy": policy_digest(ctx.config.policy_bundle_path),
+                "config": measured.components["config"],
+            }
+        ).digest
+        if digest == held.sealed_digest:
+            return False
+        from tpm2_pytss.ESAPI import ESAPI
+
+        with ESAPI() as ectx:
+            held.reseal(ectx, digest)
+    except Exception as exc:  # noqa: BLE001 - enforcement must not depend on the TPM
+        logger.warning(
+            "#462: the signing key could not be resealed after a policy reload, so "
+            "the next start will refuse with SEALED_KEY_DIGEST_MISMATCH until "
+            "`cmcp key reseal` is run: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        return False
+    logger.info("#462: signing key resealed to the reloaded digest %s", digest.hex()[:16])
+    return True
