@@ -78,6 +78,8 @@ _TPM_EO_EQ = 0x0000
 _TPM_RC_POLICY = 0x126
 _TPM_RC_POLICY_FAIL = 0x09D
 _TPM_RC_HANDLE = 0x08B
+# TPM2_Load: TPM_RC_INTEGRITY attributed to inPrivate (parameter 1).
+_TPM_RC_LOAD_INTEGRITY = 0x1DF
 
 
 class SealedKeyError(CMCPError):
@@ -100,7 +102,7 @@ class SealedKeyDigestMismatch(SealedKeyError):
 
 
 class SealedKeyTpmChanged(SealedKeyError):
-    """The blob does not belong to this TPM: another host, or after TPM2_Clear."""
+    """The gate is absent or the blob fails integrity under this TPM's parent."""
 
     code = "SEALED_KEY_TPM_CHANGED"
 
@@ -527,9 +529,16 @@ def _unseal(ectx: Any, blob: SealedBlob, gate: Any) -> bytes:
         try:
             obj = ectx.load(parent, private, public)
         except Exception as exc:  # noqa: BLE001
-            raise SealedKeyTpmChanged(
-                "the sealed blob does not load on this TPM: another host, or the TPM was cleared",
-                detail=str(exc),
+            # A resource/transport failure says nothing about the key's custody.
+            # Match the complete TPM response: a TSS-layer error must not alias it.
+            if getattr(exc, "rc", None) == _TPM_RC_LOAD_INTEGRITY:
+                raise SealedKeyTpmChanged(
+                    "the sealed blob does not load on this TPM: its integrity check failed; "
+                    "another host, a cleared TPM, or an altered store",
+                    detail=str(exc),
+                ) from exc
+            raise SealedKeyUnavailable(
+                "the TPM could not load the sealed signing key", detail=str(exc)
             ) from exc
         try:
             session = _salted_session(ectx, parent, TPM2_SE.POLICY, TPMA_SESSION.ENCRYPT)

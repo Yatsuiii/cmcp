@@ -68,7 +68,7 @@ Closes #22.
 
 **Codes and the usual fix**:
 - `SEALED_KEY_DIGEST_MISMATCH`: code, policy or configuration changed. Stop, run `cmcp key reseal` (it seals the same key to this installation's digest), start again. If the change was not intended, that is what this refusal is for.
-- `SEALED_KEY_TPM_CHANGED`: the store came from another host, or the TPM was cleared. The key is gone; `cmcp key rotate` makes a new one.
+- `SEALED_KEY_TPM_CHANGED`: the sealed-key gate is absent, or the stored blob failed its integrity check under this TPM's storage parent. The store may belong to another host, the TPM may have been cleared, or the store may have been altered. Investigate the original host and store backups before explicitly rotating; `cmcp key rotate` makes a new key. A transient or unknown load failure is `SEALED_KEY_UNAVAILABLE`, not evidence that the key is gone.
 - `SEALED_KEY_MISSING`: the store was lost. Restore it, or `cmcp key rotate`.
 - `SEALED_KEY_PUBLIC_KEY_MISMATCH`: the store was altered. Investigate before rotating.
 - `SEALED_KEY_LOCKED`: another gateway or `cmcp key` command holds the store.
