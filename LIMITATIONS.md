@@ -237,6 +237,7 @@ With `attestation.seal_signing_key`, the TRACE signing key survives restarts, se
 - **A modified gateway that reports the approved digest.** The digest is computed by the gateway's own measurement code; a gateway that lies about it gets the key. The measurement extend index has the same limit.
 - **A crash between unseal and closing the gate.** For that moment the gate holds the approved digest, so another process with TPM access could unseal until the next start closes it.
 - **Boot state.** PCRs are not in the policy (deferred to P4), so the same digest unseals after a firmware or kernel change.
+- **Per-start uniqueness of the quote.** The TPM quote signs only the key thumbprint, `report_data[:32]`. With the key persistent, two starts quote over the same qualifying data; the random salt changes `report_data` but is not signed by the TPM.
 
 A verifier cannot tell from evidence that a key is sealed, so no claim field says so. One sealed gateway per TPM.
 
