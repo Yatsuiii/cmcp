@@ -75,7 +75,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --require-hashes -r requirements/tpm.txt
+          python -m pip install --require-hashes -r requirements/dev.txt -r requirements/tpm.txt
           python -m pip install --no-deps -e .
 
       - name: Sealed signing key against swtpm
