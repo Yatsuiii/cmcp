@@ -77,7 +77,7 @@ def tpm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Swtpm]:
         instance.stop()
 
 
-def _gateway(tmp_path: Path, *, seal: bool = True) -> Path:
+def _gateway(tmp_path: Path, *, seal: bool = True, reload: bool = False) -> Path:
     policy_dir = tmp_path / "policy"
     policy_dir.mkdir(exist_ok=True)
     (policy_dir / "manifest.json").write_text(json.dumps(_MANIFEST))
@@ -93,8 +93,28 @@ def _gateway(tmp_path: Path, *, seal: bool = True) -> Path:
         "  provider: tpm\n"
         f"  seal_signing_key: {'true' if seal else 'false'}\n"
         f"  sealed_key_dir: {tmp_path / 'sealed'}\n"
+        + ("policy_reload_interval_seconds: 1\n" if reload else "")
     )
     return config_path
+
+
+_CHANGED_POLICY = "permit(principal, action, resource) when { 1 == 1 };"
+
+
+def _reload(ctx: RuntimeContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Change the bundle and have the store verify and accept it, as a reload does.
+
+    Only the store's interval clock is moved on, for the one call, so the reload
+    itself is the real one. Returns the accepted bundle hash.
+    """
+    import cmcp_runtime.policy.bundle as bundle_module
+
+    (tmp_path / "policy" / "allow.cedar").write_text(_CHANGED_POLICY)
+    later = bundle_module.time.monotonic() + 3600
+    with monkeypatch.context() as m:
+        m.setattr(bundle_module.time, "monotonic", lambda: later)
+        assert ctx.policy_bundle.reload_if_stale()
+    return str(ctx.policy_bundle.bundle.bundle_hash)
 
 
 def _start(config_path: Path) -> RuntimeContext:
@@ -155,14 +175,12 @@ def test_a_changed_policy_refuses_to_start(
 
 
 def test_a_verified_reload_reseals_so_the_next_start_keeps_the_key(
-    tpm: Swtpm, tmp_path: Path
+    tpm: Swtpm, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    config_path = _gateway(tmp_path)
+    config_path = _gateway(tmp_path, reload=True)
     ctx = _start(config_path)
     public_key = ctx.signing_key.public_key_bytes
-    (tmp_path / "policy" / "allow.cedar").write_text(
-        "permit(principal, action, resource) when { 1 == 1 };"
-    )
+    _reload(ctx, tmp_path, monkeypatch)
     assert reseal_after_reload(ctx) is True
     assert reseal_after_reload(ctx) is False  # already sealed to this digest
     _stop(ctx)
@@ -310,13 +328,11 @@ def test_a_store_rewritten_behind_the_lock_is_refused(
 
 
 def test_a_reload_while_the_tpm_is_away_keeps_serving_and_the_next_start_refuses(
-    tpm: Swtpm, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tpm: Swtpm, tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    config_path = _gateway(tmp_path)
+    config_path = _gateway(tmp_path, reload=True)
     ctx = _start(config_path)
-    (tmp_path / "policy" / "allow.cedar").write_text(
-        "permit(principal, action, resource) when { 1 == 1 };"
-    )
+    _reload(ctx, tmp_path, monkeypatch)
     tpm.stop()
     with caplog.at_level(logging.WARNING):
         assert reseal_after_reload(ctx) is False
@@ -325,3 +341,24 @@ def test_a_reload_while_the_tpm_is_away_keeps_serving_and_the_next_start_refuses
 
     tpm.start()
     assert "SEALED_KEY_DIGEST_MISMATCH" in _refused(caplog, config_path)
+
+
+def test_a_bundle_changed_after_the_reload_was_verified_is_not_sealed_to(
+    tpm: Swtpm, tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reseal reads the bundle once and seals that read only if it is what the store
+    accepted. A write between verification and the reseal is refused, so an unverified
+    bundle never gets a blob for the key. The control is the verified-reload test above.
+    """
+    config_path = _gateway(tmp_path, reload=True)
+    ctx = _start(config_path)
+    accepted = _reload(ctx, tmp_path, monkeypatch)
+    sealed_before = SealedKeyStore(tmp_path / "sealed").read()
+    (tmp_path / "policy" / "allow.cedar").write_text(
+        "permit(principal, action, resource) when { 2 == 2 };"
+    )
+    with caplog.at_level(logging.WARNING):
+        assert reseal_after_reload(ctx) is False
+    assert "not the one the reload verified" in caplog.text and accepted in caplog.text
+    assert SealedKeyStore(tmp_path / "sealed").read() == sealed_before
+    _stop(ctx)

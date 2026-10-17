@@ -312,6 +312,16 @@ def policy_digest(policy_bundle_path: str) -> str:
     the attestation report is produced at step 2. This reads bytes off disk and
     needs nothing validated first.
     """
+    return policy_digest_of_files(read_policy_files(policy_bundle_path))
+
+
+def read_policy_files(policy_bundle_path: str) -> dict[str, bytes]:
+    """Every file in the policy bundle, by path relative to it, read once.
+
+    A caller that needs two things from the same bundle, such as the measurement and
+    the canonical hash, takes both from one read so a write in between cannot split
+    them.
+    """
     root = Path(policy_bundle_path)
     if not root.exists():
         raise MeasurementUnavailable(
@@ -325,17 +335,21 @@ def policy_digest(policy_bundle_path: str) -> str:
             "the policy bundle directory is empty, so policy cannot be measured",
             detail=f"path={policy_bundle_path}",
         )
+    return {
+        (p.relative_to(root).as_posix() if root.is_dir() else p.name): p.read_bytes()
+        for p in files
+    }
 
+
+def policy_digest_of_files(files: Mapping[str, bytes]) -> str:
+    """The policy component of the gateway measurement, from :func:`read_policy_files`."""
     parts = [
         json.dumps(
-            {
-                "path": p.relative_to(root).as_posix() if root.is_dir() else p.name,
-                "sha256": _sha256_hex(p.read_bytes()),
-            },
+            {"path": path, "sha256": _sha256_hex(content)},
             separators=(",", ":"),
             sort_keys=True,
         )
-        for p in files
+        for path, content in files.items()
     ]
     return _sha256_hex("\n".join(parts).encode())
 

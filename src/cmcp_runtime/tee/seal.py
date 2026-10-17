@@ -830,9 +830,11 @@ def reseal_after_reload(ctx: Any) -> bool:
     A reload that changes the bundle has passed the pinned signing key or the
     pinned hash, and only then does the evaluator call back. The new digest takes
     code and config from the startup measurement and recomputes only policy, so a
-    file changed on disk outside a reload is not sealed in. Returns True when a new
-    blob was written. A failure is logged and swallowed: the gateway keeps serving
-    with the key it holds, and the next start fails with
+    file changed on disk outside a reload is not sealed in. The bundle is read once,
+    and that read is sealed only if its canonical hash is the bundle the store
+    accepted: a write after verification is refused, not sealed to. Returns True
+    when a new blob was written. A refusal or failure is logged and swallowed: the
+    gateway keeps serving with the key it holds, and the next start fails with
     ``SEALED_KEY_DIGEST_MISMATCH`` until ``cmcp key reseal`` is run.
     """
     held = getattr(ctx, "sealed_key", None)
@@ -840,13 +842,28 @@ def reseal_after_reload(ctx: Any) -> bool:
     if held is None or measured is None:
         return False
 
-    from cmcp_runtime.tee.measurement import measurement_from_components, policy_digest
+    from cmcp_runtime.policy.bundle import bundle_hash_of_files
+    from cmcp_runtime.tee.measurement import (
+        measurement_from_components,
+        policy_digest_of_files,
+        read_policy_files,
+    )
 
     try:
+        files = read_policy_files(ctx.config.policy_bundle_path)
+        accepted = ctx.policy_bundle.bundle.bundle_hash
+        if bundle_hash_of_files(files) != accepted:
+            logger.warning(
+                "#462: the policy bundle on disk is not the one the reload verified "
+                "(%s), so the signing key is not resealed; the next start will refuse "
+                "with SEALED_KEY_DIGEST_MISMATCH until `cmcp key reseal` is run",
+                accepted,
+            )
+            return False
         digest = measurement_from_components(
             {
                 "code": measured.components["code"],
-                "policy": policy_digest(ctx.config.policy_bundle_path),
+                "policy": policy_digest_of_files(files),
                 "config": measured.components["config"],
             }
         ).digest
