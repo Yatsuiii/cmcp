@@ -33,7 +33,7 @@ This is the normative registry for all error codes used across the cMCP Runtime.
 | `SESSION_RESET_REQUIRED` | 428 | INFO | Agent attempted call that requires session reset first | [session-policy.md](session-policy.md) |
 | `SESSION_STATE_STORE_UNAVAILABLE` | startup | FATAL | A configured `session_state_path` could not be opened, so the gateway would run without the cross-instance session-state persistence the operator configured | [configuration.md](../configuration.md) |
 | `SEALED_KEY_DIGEST_MISMATCH` | startup | FATAL | `attestation.seal_signing_key` is on and no sealed key exists for this gateway digest, or the TPM refused to unseal under it. The code, policy or configuration changed without `cmcp key reseal` | [attestation.md §4.2](attestation.md) |
-| `SEALED_KEY_TPM_CHANGED` | startup | FATAL | The sealed key does not belong to this TPM: another host, or the TPM was cleared | [attestation.md §4.2](attestation.md) |
+| `SEALED_KEY_TPM_CHANGED` | startup | FATAL | The sealed key does not belong to this TPM: another host, the TPM was cleared, or the store was altered. A TPM that fails to answer is `SEALED_KEY_UNAVAILABLE` instead | [attestation.md §4.2](attestation.md) |
 | `SEALED_KEY_MISSING` | startup | FATAL | This TPM has a sealed-key gate but there is no sealed key store for it. Restore the store or run `cmcp key rotate` | [attestation.md §4.2](attestation.md) |
 | `SEALED_KEY_PUBLIC_KEY_MISMATCH` | startup | FATAL | The stored public key does not match the secret the TPM unsealed | [attestation.md §4.2](attestation.md) |
 | `SEALED_KEY_LOCKED` | startup | FATAL | Another process holds the sealed key store | [attestation.md §4.2](attestation.md) |

@@ -421,6 +421,28 @@ def test_a_tpm_out_of_object_memory_cannot_create_the_parent(
     assert _gate_value(tpm) == GATE_SENTINEL
 
 
+def test_a_tpm_out_of_object_memory_at_the_load_is_unavailable_not_changed(
+    tpm: Swtpm, store: SealedKeyStore
+) -> None:
+    """With one slot free the parent fits and the blob's TPM2_Load does not. That says
+    nothing about where the key belongs, so it is not SEALED_KEY_TPM_CHANGED."""
+    from tpm2_pytss.constants import ESYS_TR
+
+    public_key = _open(tpm, store, DIGEST_A).public_key
+    with tpm.context() as ectx:
+        held: list[object] = []
+        _fill_until_refused(
+            lambda: held.append(ectx.create_primary(None, "ecc256", ESYS_TR.OWNER)[0])
+        )
+        ectx.flush_context(held.pop())
+        with pytest.raises(SealedKeyUnavailable, match="could not load"):
+            seal.open_sealed_key(ectx, store, DIGEST_A)
+        for handle in held:  # swtpm has no resource manager to drop them on close
+            ectx.flush_context(handle)
+    assert _gate_value(tpm) == GATE_SENTINEL
+    assert _open(tpm, store, DIGEST_A).public_key == public_key
+
+
 def test_a_tpm_out_of_session_memory_cannot_start_a_session(
     tpm: Swtpm, store: SealedKeyStore
 ) -> None:
