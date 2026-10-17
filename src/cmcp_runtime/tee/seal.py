@@ -138,13 +138,14 @@ def gate_nv_public_bytes(index: int = DEFAULT_GATE_NV_INDEX, *, written: bool = 
     )
 
 
-def gate_nv_name(index: int = DEFAULT_GATE_NV_INDEX) -> bytes:
-    """The gate's Name once written, which is the form ``PolicyNV`` binds.
+def gate_nv_name(index: int = DEFAULT_GATE_NV_INDEX, *, written: bool = True) -> bytes:
+    """The gate's Name; written by default, which is the form ``PolicyNV`` binds.
 
     The WRITTEN bit is part of the Name, and the gate is always written before a
-    policy session runs against it, so only the written form is ever useful.
+    policy session runs against it. The unwritten form only identifies a gate whose
+    provisioning stopped between its definition and its first write.
     """
-    public = gate_nv_public_bytes(index, written=True)
+    public = gate_nv_public_bytes(index, written=written)
     return struct.pack(">H", _GATE_NAME_ALG) + hashlib.sha256(public).digest()
 
 
@@ -419,19 +420,24 @@ def _gate_handle(ectx: Any, index: int) -> Any | None:
         ) from exc
 
 
-def _check_gate(ectx: Any, handle: Any, index: int) -> None:
-    """Fail unless the gate is the exact written profile ``policy_nv_digest`` assumes.
-
-    The Name binding already makes a different index useless for unsealing; this
-    turns that into a clear error instead of a refused unseal.
-    """
+def _gate_name(ectx: Any, handle: Any, index: int) -> bytes:
     try:
         _public, name = ectx.nv_read_public(handle)
     except Exception as exc:  # noqa: BLE001
         raise SealedKeyUnavailable(
             "the gate NV index could not be read", detail=f"index={index:#x}: {exc}"
         ) from exc
-    if bytes(name) != gate_nv_name(index):
+    return bytes(name)
+
+
+def _check_gate(ectx: Any, handle: Any, index: int) -> None:
+    """Fail unless the gate is the exact written profile ``policy_nv_digest`` assumes.
+
+    The Name binding already makes a different index useless for unsealing; this
+    turns that into a clear error instead of a refused unseal.
+    """
+    name = _gate_name(ectx, handle, index)
+    if name != gate_nv_name(index):
         raise SealedKeyUnavailable(
             "the gate NV index does not match the sealed-key profile",
             detail=f"index={index:#x} Name={bytes(name).hex()} expected={gate_nv_name(index).hex()}",
@@ -766,6 +772,11 @@ def rotate_sealed_key(
     gate = _gate_handle(ectx, gate_index)
     if gate is None:
         gate = _define_gate(ectx, gate_index)
+        _write_gate(ectx, gate, GATE_SENTINEL)
+    elif _gate_name(ectx, gate, gate_index) == gate_nv_name(gate_index, written=False):
+        # Provisioning stopped between defining the gate and its first write, which
+        # startup reports as SEALED_KEY_MISSING with this command as the remedy. Only
+        # this exact template is finished here; any other index is refused below.
         _write_gate(ectx, gate, GATE_SENTINEL)
     _check_gate(ectx, gate, gate_index)
     seed = os.urandom(SEED_SIZE)

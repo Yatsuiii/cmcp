@@ -371,7 +371,7 @@ Opt-in with `attestation.seal_signing_key`, on the `tpm` provider only, which ha
 
 - Policy reload: after a verified reload the running gateway seals the key it holds to the new digest. It takes code and configuration from the startup measurement and recomputes only policy, from one read of the bundle that it seals only if its canonical hash is the bundle the reload accepted; a bundle changed after verification is not sealed to. A refused or failed reseal is logged; the gateway keeps serving, and the next start refuses until `cmcp key reseal` is run.
 - Upgrade: with the gateway stopped, `cmcp key reseal` seals the same key to the new build's digest, which `cmcp measure` prints. The previous blob is kept, so a rollback still starts.
-- Rotation: `cmcp key rotate` replaces the key on purpose and drops every blob, and it is the recovery for a lost store. Relying parties pinning the old key must be told.
+- Rotation: `cmcp key rotate` replaces the key on purpose and drops every blob, and it is the recovery for a lost store, and for a provisioning that stopped after defining the gate but before its first write, which it finishes only for that exact template. Relying parties pinning the old key must be told.
 
 This replaces the rule that stood here before: that an upgrade mints a fresh key sealed to the new measurement. Minting on a measurement change is the same as minting on a mismatch.
 

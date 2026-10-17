@@ -370,6 +370,22 @@ def test_a_tpm_that_stops_answering_is_unavailable_not_changed(
     assert _open(tpm, store, DIGEST_A).public_key == public_key
 
 
+def test_rotation_finishes_a_gate_that_was_defined_but_never_written(
+    tpm: Swtpm, store: SealedKeyStore
+) -> None:
+    """Provisioning can stop between defining the gate and its first write. Startup then
+    refuses and names `cmcp key rotate`, so rotation has to finish that exact template.
+    An index with any other profile is still refused: see the foreign-profile test."""
+    with tpm.context() as ectx:
+        seal._define_gate(ectx, seal.DEFAULT_GATE_NV_INDEX)
+    with pytest.raises(SealedKeyMissing, match="cmcp key rotate"):
+        _open(tpm, store, DIGEST_A)
+    with tpm.context() as ectx:
+        public_key = seal.rotate_sealed_key(ectx, store, DIGEST_A)
+    assert _gate_value(tpm) == GATE_SENTINEL
+    assert _open(tpm, store, DIGEST_A).public_key == public_key
+
+
 def test_rotation_after_tpm2_clear_defines_a_new_gate(tpm: Swtpm, store: SealedKeyStore) -> None:
     """The documented recovery: the old key is gone with the TPM's seeds, rotation mints one."""
     from tpm2_pytss.constants import ESYS_TR
