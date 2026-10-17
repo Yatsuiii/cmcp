@@ -11,7 +11,7 @@ import os
 import secrets
 import sys
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NoReturn
 
 from cmcp_runtime.agent_manifest import (
     AgentManifestBinding,
@@ -386,7 +386,7 @@ class _SealedStart:
     seed_if_new: bytes | None  # set when this start will provision
 
 
-def _fatal_sealed(exc: SealedKeyError) -> None:
+def _fatal_sealed(exc: SealedKeyError) -> NoReturn:
     _fatal(exc.code, str(exc), detail=exc.detail or "", action="startup_aborted")
     sys.exit(1)
 
@@ -405,7 +405,6 @@ def _begin_sealed_start(config: Config) -> _SealedStart:
         public_key = stored_public_key(store)
     except SealedKeyError as exc:
         _fatal_sealed(exc)
-        raise  # unreachable: _fatal_sealed exits
     seed_if_new = None
     if public_key is None:
         seed_if_new = secrets.token_bytes(32)
@@ -424,12 +423,10 @@ def _finish_sealed_start(
                 "the signing key under"
             )
         )
-        raise AssertionError("unreachable")
     try:
         from tpm2_pytss.ESAPI import ESAPI
     except ImportError as exc:
         _fatal_sealed(SealedKeyUnavailable("tpm2-pytss is required to unseal", detail=str(exc)))
-        raise AssertionError("unreachable") from exc
     try:
         with ESAPI() as ectx:
             opened = open_sealed_key(
@@ -437,7 +434,6 @@ def _finish_sealed_start(
             )
     except SealedKeyError as exc:
         _fatal_sealed(exc)
-        raise
     except Exception as exc:  # noqa: BLE001 - any TPM fault means no key
         _fatal_sealed(
             SealedKeyUnavailable(
@@ -445,7 +441,6 @@ def _finish_sealed_start(
                 detail=f"{type(exc).__name__}: {exc}",
             )
         )
-        raise
     if opened.public_key != start.public_key:
         _fatal_sealed(
             SealedKeyPublicKeyMismatch(

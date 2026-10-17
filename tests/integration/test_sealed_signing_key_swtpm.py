@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -176,7 +176,7 @@ def test_with_an_owner_password_a_process_without_it_cannot_start(
     _open(tpm, store, DIGEST_A)
     with tpm.context() as ectx:
         ectx.hierarchy_change_auth(ESYS_TR.OWNER, b"owner-secret")
-    with pytest.raises(SealedKeyUnavailable):
+    with pytest.raises(SealedKeyUnavailable, match="owner password"):
         _open(tpm, store, DIGEST_A)
 
 
@@ -249,6 +249,11 @@ def test_a_blob_from_another_tpm_is_refused(
     _open(tpm, store, DIGEST_A)
     with pytest.raises(SealedKeyTpmChanged, match="no gate"):
         _open(other_tpm, store, DIGEST_A)
+    with (
+        other_tpm.context() as ectx,
+        pytest.raises(SealedKeyTpmChanged, match="no sealed-key gate"),
+    ):
+        seal.reseal_stored_key(ectx, store, DIGEST_B)
 
     # Even with a gate defined there, the blob does not load.
     _open(other_tpm, SealedKeyStore(tmp_path / "unrelated"), DIGEST_A)
@@ -276,6 +281,8 @@ def test_a_swapped_public_key_is_refused(tpm: Swtpm, store: SealedKeyStore) -> N
     store.path.write_text(json.dumps(raw))
     with pytest.raises(SealedKeyPublicKeyMismatch):
         _open(tpm, store, DIGEST_A)
+    with tpm.context() as ectx, pytest.raises(SealedKeyPublicKeyMismatch):
+        seal.reseal_stored_key(ectx, store, DIGEST_B)
 
 
 # S10
@@ -343,4 +350,139 @@ def test_a_tpm_failure_during_the_unseal_is_not_reported_as_a_mismatch(
         ectx.unseal = retry  # type: ignore[method-assign]
         with pytest.raises(SealedKeyUnavailable, match="failed while unsealing"):
             seal._open_gate_and_unseal(ectx, blob, gate)
+    assert _gate_value(tpm) == GATE_SENTINEL
+
+
+def test_rotation_after_tpm2_clear_defines_a_new_gate(tpm: Swtpm, store: SealedKeyStore) -> None:
+    """The documented recovery: the old key is gone with the TPM's seeds, rotation mints one."""
+    from tpm2_pytss.constants import ESYS_TR
+
+    old = _open(tpm, store, DIGEST_A).public_key
+    with tpm.context() as ectx:
+        ectx.clear(ESYS_TR.LOCKOUT)
+        new = seal.rotate_sealed_key(ectx, store, DIGEST_A)
+    assert new != old
+    assert _open(tpm, store, DIGEST_A).public_key == new
+
+
+def test_a_bad_provisioning_seed_is_refused_before_the_tpm_is_touched(
+    tpm: Swtpm, store: SealedKeyStore
+) -> None:
+    with tpm.context() as ectx:
+        with pytest.raises(ValueError, match="32 bytes"):
+            seal.open_sealed_key(ectx, store, DIGEST_A, seed_if_new=b"short")
+        assert seal._gate_handle(ectx, seal.DEFAULT_GATE_NV_INDEX) is None
+    assert store.read() is None
+    assert _open(tpm, store, DIGEST_A).provisioned
+
+
+# The TPM running out or refusing. Each is a sealed-key error with its own message,
+# which startup reports as SEALED_KEY_UNAVAILABLE, never a TSS2 traceback.
+
+
+def _fill_until_refused(take: Callable[[], object]) -> None:
+    """Hold TPM resources until the TPM refuses one; the limit depends on the build."""
+    for held in range(256):
+        try:
+            take()
+        except Exception:  # noqa: BLE001 - the refusal is the point
+            assert held > 0, "the TPM refused the first one, so it was not full"
+            return
+    raise AssertionError("the TPM never ran out")
+
+
+def test_a_tpm_out_of_object_memory_cannot_create_the_parent(
+    tpm: Swtpm, store: SealedKeyStore
+) -> None:
+    from tpm2_pytss.constants import ESYS_TR
+
+    _open(tpm, store, DIGEST_A)
+    with tpm.context() as ectx:
+        _fill_until_refused(lambda: ectx.create_primary(None, "ecc256", ESYS_TR.OWNER))
+        with pytest.raises(SealedKeyUnavailable, match="storage parent"):
+            seal.open_sealed_key(ectx, store, DIGEST_A)
+    assert _gate_value(tpm) == GATE_SENTINEL
+
+
+def test_a_tpm_out_of_session_memory_cannot_start_a_session(
+    tpm: Swtpm, store: SealedKeyStore
+) -> None:
+    from tpm2_pytss.constants import ESYS_TR, TPM2_ALG, TPM2_SE
+
+    _open(tpm, store, DIGEST_A)
+    with tpm.context() as ectx:
+        _fill_until_refused(
+            lambda: ectx.start_auth_session(
+                ESYS_TR.NONE, ESYS_TR.NONE, TPM2_SE.HMAC, None, TPM2_ALG.SHA256
+            )
+        )
+        with pytest.raises(SealedKeyUnavailable, match="session could not be started"):
+            seal.open_sealed_key(ectx, store, DIGEST_A)
+    assert _gate_value(tpm) == GATE_SENTINEL
+
+
+def test_a_tpm_with_no_nv_space_cannot_provision_and_writes_no_store(
+    tpm: Swtpm, store: SealedKeyStore
+) -> None:
+    from tpm2_pytss.constants import ESYS_TR, TPM2_ALG, TPMA_NV
+    from tpm2_pytss.types import TPM2B_DIGEST, TPM2B_NV_PUBLIC, TPMS_NV_PUBLIC
+
+    index = 0x01500000
+    with tpm.context() as ectx:
+        for size in (2048, 256, 32, 1):  # large first, then whatever is left
+            while True:
+                try:
+                    ectx.nv_define_space(
+                        b"",
+                        TPM2B_NV_PUBLIC(
+                            nvPublic=TPMS_NV_PUBLIC(
+                                nvIndex=index,
+                                nameAlg=TPM2_ALG.SHA256,
+                                attributes=TPMA_NV.parse("authwrite|authread|no_da"),
+                                authPolicy=TPM2B_DIGEST(),
+                                dataSize=size,
+                            )
+                        ),
+                        auth_handle=ESYS_TR.OWNER,
+                    )
+                except Exception:  # noqa: BLE001 - the TPM's NV space is full at this size
+                    break
+                index += 1
+        assert index < seal.DEFAULT_GATE_NV_INDEX  # the filler never took the gate's handle
+        with pytest.raises(SealedKeyUnavailable, match="could not be defined"):
+            seal.open_sealed_key(ectx, store, DIGEST_A)
+    assert store.read() is None
+
+
+def test_a_secret_the_tpm_will_not_seal_is_a_sealed_key_error(tpm: Swtpm) -> None:
+    # A sealed data object holds at most 128 bytes; the TPM refuses with TPM_RC_SIZE.
+    with tpm.context() as ectx, pytest.raises(SealedKeyUnavailable, match="could not seal"):
+        seal._seal(ectx, b"\x01" * 129, DIGEST_A, seal.DEFAULT_GATE_NV_INDEX)
+
+
+def test_a_truncated_blob_is_malformed_and_leaves_the_gate_closed(
+    tpm: Swtpm, store: SealedKeyStore
+) -> None:
+    _open(tpm, store, DIGEST_A)
+    raw = json.loads(store.path.read_text())
+    # A bad private area is found at the unseal, with the gate open, which it then
+    # closes; a bad public area is found before the gate is touched.
+    for part in ("private", "public"):
+        raw["blobs"][0][part] = raw["blobs"][0][part][:20]
+        store.path.write_text(json.dumps(raw))
+        with pytest.raises(SealedKeyUnavailable, match="malformed"):
+            _open(tpm, store, DIGEST_A)
+        assert _gate_value(tpm) == GATE_SENTINEL
+
+
+def test_a_sealed_secret_that_is_not_a_seed_is_refused(tpm: Swtpm, store: SealedKeyStore) -> None:
+    """A blob that unseals under the right policy but holds the wrong thing."""
+    _open(tpm, store, DIGEST_A)
+    contents = store.read()
+    assert contents is not None
+    with tpm.context() as ectx:
+        short = seal._seal(ectx, b"short", DIGEST_A, seal.DEFAULT_GATE_NV_INDEX)
+    store.write(seal.StoreContents(contents.gate_index, contents.public_key, (short,)))
+    with pytest.raises(SealedKeyUnavailable, match="not an Ed25519 seed"):
+        _open(tpm, store, DIGEST_A)
     assert _gate_value(tpm) == GATE_SENTINEL

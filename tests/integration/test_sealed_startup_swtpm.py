@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -250,3 +251,77 @@ def test_the_commands_refuse_while_a_gateway_holds_the_key(tpm: Swtpm, tmp_path:
     assert result.exit_code == 1
     assert "SEALED_KEY_LOCKED" in result.output
     _stop(running)
+
+
+# Startup's own refusals. Each is fatal, with the sealed-key code, before any traffic.
+
+
+def _refused(caplog: pytest.LogCaptureFixture, config_path: Path) -> str:
+    with caplog.at_level(logging.CRITICAL), pytest.raises(SystemExit) as exc:
+        run_startup(str(config_path))
+    assert exc.value.code == 1
+    return caplog.text
+
+
+def test_an_unmeasurable_gateway_gets_no_key(
+    tpm: Swtpm, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Dev mode lets an unmeasurable gateway start, but there is no digest to unseal under."""
+    config_path = _gateway(tmp_path)
+    shutil.rmtree(tmp_path / "policy")
+    text = _refused(caplog, config_path)
+    assert "SEALED_KEY_UNAVAILABLE" in text and "could not be measured" in text
+
+
+def test_a_tpm_that_has_gone_away_is_reported_not_raised(
+    tpm: Swtpm, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    config_path = _gateway(tmp_path)
+    _stop(_start(config_path))
+    tpm.stop()
+    text = _refused(caplog, config_path)
+    assert "SEALED_KEY_UNAVAILABLE" in text and "could not be opened" in text
+
+
+def test_a_store_rewritten_behind_the_lock_is_refused(
+    tpm: Swtpm, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The key the nonce committed is checked against the key the TPM unsealed.
+
+    Something that ignores the lock provisions another key between the nonce and
+    the unseal; the gateway must not sign with a key its attestation does not name.
+    """
+    from cmcp_runtime.config import load_config
+    from cmcp_runtime.startup import _begin_sealed_start, _finish_sealed_start
+    from cmcp_runtime.tee.measurement import GatewayMeasurement
+    from cmcp_runtime.tee.seal import open_sealed_key
+
+    config = load_config(str(_gateway(tmp_path)))
+    start = _begin_sealed_start(config)
+    digest = b"\x0d" * 32
+    with tpm.context() as ectx:
+        open_sealed_key(ectx, SealedKeyStore(tmp_path / "sealed"), digest)
+    try:
+        with caplog.at_level(logging.CRITICAL), pytest.raises(SystemExit):
+            _finish_sealed_start(start, GatewayMeasurement(digest, {}))
+    finally:
+        start.lock.release()
+    assert "SEALED_KEY_PUBLIC_KEY_MISMATCH" in caplog.text
+
+
+def test_a_reload_while_the_tpm_is_away_keeps_serving_and_the_next_start_refuses(
+    tpm: Swtpm, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    config_path = _gateway(tmp_path)
+    ctx = _start(config_path)
+    (tmp_path / "policy" / "allow.cedar").write_text(
+        "permit(principal, action, resource) when { 1 == 1 };"
+    )
+    tpm.stop()
+    with caplog.at_level(logging.WARNING):
+        assert reseal_after_reload(ctx) is False
+    assert "could not be resealed" in caplog.text
+    _stop(ctx)
+
+    tpm.start()
+    assert "SEALED_KEY_DIGEST_MISMATCH" in _refused(caplog, config_path)

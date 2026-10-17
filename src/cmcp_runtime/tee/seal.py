@@ -305,6 +305,7 @@ class SealedKeyStore:
         if sys.platform == "win32":  # also tells mypy fcntl below is POSIX-only
             raise SealedKeyUnavailable("sealing needs fcntl, so it is Linux-only")
         import fcntl
+
         try:
             self.directory.mkdir(parents=True, exist_ok=True)
             handle = open(self.lock_path, "w")  # noqa: SIM115 - held for the lock's lifetime
@@ -447,7 +448,8 @@ def _write_gate(ectx: Any, gate: Any, value: bytes) -> None:
         ectx.nv_write(gate, value, 0, auth_handle=ESYS_TR.OWNER)
     except Exception as exc:  # noqa: BLE001
         raise SealedKeyUnavailable(
-            "the gate NV index could not be written", detail=str(exc)
+            "the gate NV index could not be written; an owner password may be set",
+            detail=str(exc),
         ) from exc
 
 
@@ -629,12 +631,12 @@ def open_sealed_key(
     gate = _gate_handle(ectx, gate_index)
 
     if contents is None and gate is None:
+        seed = seed_if_new if seed_if_new is not None else os.urandom(SEED_SIZE)
+        if len(seed) != SEED_SIZE:  # before the TPM is touched, so a bad seed defines no gate
+            raise ValueError("an Ed25519 seed is 32 bytes")
         gate = _define_gate(ectx, gate_index)
         _write_gate(ectx, gate, GATE_SENTINEL)
         _check_gate(ectx, gate, gate_index)
-        seed = seed_if_new if seed_if_new is not None else os.urandom(SEED_SIZE)
-        if len(seed) != SEED_SIZE:
-            raise ValueError("an Ed25519 seed is 32 bytes")
         public_key = ed25519_public_key(seed)
         first = _seal(ectx, seed, digest, gate_index)
         store.write(StoreContents(gate_index, public_key, (first,)))
