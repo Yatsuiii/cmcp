@@ -101,7 +101,7 @@ policy_reload_interval_seconds: 0
 | `staleness_policy` | string | `fail_closed` | Action when attestation validity expires. Valid values: `fail_closed` (terminate sessions), `warn_only` (allow sessions, mark claims as stale). |
 | `expected_measurement` | string | none | Optional. Expected TEE measurement value. If set, the runtime verifies the hardware measurement matches this string at startup and exits with a non-zero status if it does not. |
 | `seal_signing_key` | boolean | `false` | Keep one TRACE signing key across restarts, sealed by the TPM to the gateway digest ([attestation.md 4.2](spec/attestation.md)). Requires `provider: tpm` named explicitly and the `tpm` extra. A start whose digest has no sealed key refuses with `SEALED_KEY_DIGEST_MISMATCH`; reseal first with `cmcp key reseal`. |
-| `sealed_key_dir` | string | `sealed-key` | Directory for the sealed key store and its lock. Nothing in it is secret. Measured, like every other setting. |
+| `sealed_key_dir` | string | `sealed-key` | Directory for the sealed key store and its lock. Nothing in it is secret. Measured, like every other setting. A relative path is resolved against the gateway's working directory and the `cmcp key` commands resolve it against theirs, so use an absolute path. |
 
 ### agent_manifest
 

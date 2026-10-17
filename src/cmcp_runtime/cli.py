@@ -411,7 +411,11 @@ def _current_digest(config_path: str) -> bytes:
     from cmcp_runtime.config import load_config
     from cmcp_runtime.tee.measurement import gateway_measurement
 
-    return gateway_measurement(load_config(config_path)).digest
+    try:
+        return gateway_measurement(load_config(config_path)).digest
+    except Exception as exc:
+        click.echo(f"{_bad()} Cannot measure: {exc}", err=True)
+        raise SystemExit(1) from exc
 
 
 @main.command()
@@ -482,6 +486,9 @@ def _with_tpm(store: Any, operation: Any) -> Any:
         detail = f" ({exc.detail})" if exc.detail else ""
         click.echo(f"{_bad()} {exc.code}: {exc}{detail}", err=True)
         raise SystemExit(1) from exc
+    except Exception as exc:  # noqa: BLE001 - the TPM could not be opened at all
+        click.echo(f"{_bad()} The TPM could not be used: {type(exc).__name__}: {exc}", err=True)
+        raise SystemExit(1) from exc
 
 
 @key.command("public")
@@ -513,7 +520,8 @@ def key_reseal(config: str, to_digest: str | None) -> None:
 
     Run with the gateway stopped. It unseals the newest blob under its own digest,
     which needs owner authorization on the TPM, and keeps the previous blob so a
-    rollback still starts.
+    rollback still starts. Without --to-digest, run it from the installation that
+    will start, with the gateway's environment, as for `cmcp measure`.
     """
     from cmcp_runtime.tee.seal import reseal_stored_key
 

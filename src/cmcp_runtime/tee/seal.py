@@ -72,6 +72,10 @@ GATE_WRITTEN_ATTRIBUTES = GATE_BASE_ATTRIBUTES | _TPMA_NV_WRITTEN
 
 _TPM_CC_POLICY_NV = 0x00000149
 _TPM_EO_EQ = 0x0000
+#: TPM 2.0 Part 2 response codes, as tpm2-pytss reports them in ``error``: the base
+#: code without the format-one parameter, handle or session number.
+_TPM_RC_POLICY = 0x126
+_TPM_RC_POLICY_FAIL = 0x09D
 
 
 class SealedKeyError(CMCPError):
@@ -259,6 +263,14 @@ class SealedKeyStore:
 
     def write(self, contents: StoreContents) -> None:
         """Replace the store atomically: write, fsync, rename, fsync the directory."""
+        try:
+            self._write(contents)
+        except OSError as exc:
+            raise SealedKeyUnavailable(
+                "the sealed signing key store could not be written", detail=f"{self.path}: {exc}"
+            ) from exc
+
+    def _write(self, contents: StoreContents) -> None:
         payload = {
             "version": STORE_VERSION,
             "gate_index": f"{contents.gate_index:#010x}",
@@ -293,8 +305,14 @@ class SealedKeyStore:
             import fcntl
         except ImportError as exc:  # pragma: no cover - the TPM tier is Linux-only
             raise SealedKeyUnavailable("sealing needs fcntl, so it is Linux-only") from exc
-        self.directory.mkdir(parents=True, exist_ok=True)
-        handle = open(self.lock_path, "w")  # noqa: SIM115 - held for the lock's lifetime
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            handle = open(self.lock_path, "w")  # noqa: SIM115 - held for the lock's lifetime
+        except OSError as exc:
+            raise SealedKeyUnavailable(
+                "the sealed signing key directory could not be used",
+                detail=f"{self.lock_path}: {exc}",
+            ) from exc
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
@@ -327,9 +345,15 @@ def _storage_parent(ectx: Any) -> Any:
         | TPMA_OBJECT.SENSITIVEDATAORIGIN
         | TPMA_OBJECT.NODA
     )
-    handle, *_ = ectx.create_primary(
-        None, TPM2B_PUBLIC.parse("ecc256:aes128cfb", objectAttributes=attributes), ESYS_TR.OWNER
-    )
+    try:
+        handle, *_ = ectx.create_primary(
+            None, TPM2B_PUBLIC.parse("ecc256:aes128cfb", objectAttributes=attributes), ESYS_TR.OWNER
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise SealedKeyUnavailable(
+            "the storage parent could not be created; an owner password may be set",
+            detail=str(exc),
+        ) from exc
     return handle
 
 
@@ -343,11 +367,29 @@ def _salted_session(ectx: Any, parent: Any, session_type: Any, attributes: Any) 
         keyBits=TPMU_SYM_KEY_BITS(aes=128),
         mode=TPMU_SYM_MODE(aes=TPM2_ALG.CFB),
     )
-    session = ectx.start_auth_session(
-        parent, ESYS_TR.NONE, session_type, symmetric, TPM2_ALG.SHA256
-    )
-    ectx.trsess_set_attributes(session, TPMA_SESSION.CONTINUESESSION | attributes)
+    try:
+        session = ectx.start_auth_session(
+            parent, ESYS_TR.NONE, session_type, symmetric, TPM2_ALG.SHA256
+        )
+        ectx.trsess_set_attributes(session, TPMA_SESSION.CONTINUESESSION | attributes)
+    except Exception as exc:  # noqa: BLE001
+        raise SealedKeyUnavailable("a TPM session could not be started", detail=str(exc)) from exc
     return session
+
+
+def _is_policy_refusal(exc: Exception) -> bool:
+    """Whether the TPM refused because the gate does not hold the blob's digest.
+
+    That is ``TPM_RC_POLICY`` from ``PolicyNV`` when the comparison fails, or
+    ``TPM_RC_POLICY_FAIL`` from the unseal when the session's policy is not the
+    blob's. Any other failure is the TPM failing, not a mismatch, and reporting it
+    as one would send an operator to reseal for nothing.
+    """
+    error = getattr(exc, "error", None)
+    try:
+        return error is not None and int(error) in (_TPM_RC_POLICY, _TPM_RC_POLICY_FAIL)
+    except (TypeError, ValueError):
+        return False
 
 
 def _gate_handle(ectx: Any, index: int) -> Any | None:
@@ -443,6 +485,8 @@ def _seal(ectx: Any, seed: bytes, digest: bytes, index: int) -> SealedBlob:
                 session1=ESYS_TR.PASSWORD,
                 session2=session,
             )
+        except Exception as exc:  # noqa: BLE001
+            raise SealedKeyUnavailable("the TPM could not seal the key", detail=str(exc)) from exc
         finally:
             ectx.flush_context(session)
     finally:
@@ -455,14 +499,15 @@ def _unseal(ectx: Any, blob: SealedBlob, gate: Any) -> bytes:
     from tpm2_pytss.constants import ESYS_TR, TPM2_EO, TPM2_SE, TPMA_SESSION
     from tpm2_pytss.types import TPM2B_OPERAND, TPM2B_PRIVATE, TPM2B_PUBLIC
 
+    try:
+        private = TPM2B_PRIVATE.unmarshal(blob.private)[0]
+        public = TPM2B_PUBLIC.unmarshal(blob.public)[0]
+    except Exception as exc:  # noqa: BLE001
+        raise SealedKeyUnavailable("the sealed blob is malformed", detail=str(exc)) from exc
     parent = _storage_parent(ectx)
     try:
         try:
-            obj = ectx.load(
-                parent,
-                TPM2B_PRIVATE.unmarshal(blob.private)[0],
-                TPM2B_PUBLIC.unmarshal(blob.public)[0],
-            )
+            obj = ectx.load(parent, private, public)
         except Exception as exc:  # noqa: BLE001
             raise SealedKeyTpmChanged(
                 "the sealed blob does not load on this TPM: another host, or the TPM was cleared",
@@ -482,9 +527,13 @@ def _unseal(ectx: Any, blob: SealedBlob, gate: Any) -> bytes:
                     )
                     secret = bytes(ectx.unseal(obj, session1=session))
                 except Exception as exc:  # noqa: BLE001
-                    raise SealedKeyDigestMismatch(
-                        "the TPM refused to unseal the signing key under this digest",
-                        detail=str(exc),
+                    if _is_policy_refusal(exc):
+                        raise SealedKeyDigestMismatch(
+                            "the TPM refused to unseal the signing key under this digest",
+                            detail=str(exc),
+                        ) from exc
+                    raise SealedKeyUnavailable(
+                        "the TPM failed while unsealing the signing key", detail=str(exc)
                     ) from exc
             finally:
                 ectx.flush_context(session)
@@ -538,7 +587,10 @@ def _check_blob_policy(blob: SealedBlob, index: int) -> None:
     """
     from tpm2_pytss.types import TPM2B_PUBLIC
 
-    public = TPM2B_PUBLIC.unmarshal(blob.public)[0].publicArea
+    try:
+        public = TPM2B_PUBLIC.unmarshal(blob.public)[0].publicArea
+    except Exception as exc:  # noqa: BLE001
+        raise SealedKeyUnavailable("the sealed blob is malformed", detail=str(exc)) from exc
     if bytes(public.authPolicy) != policy_nv_digest(blob.digest, index):
         raise SealedKeyDigestMismatch(
             "the sealed blob's policy does not match the digest it is stored under",

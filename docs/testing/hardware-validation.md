@@ -440,6 +440,11 @@ Afterwards only the two test handles were undefined, and the NV index list, the
 persistent handles and the lockout counter (0) equalled both the snapshot taken at the
 start and an earlier record of the same TPM.
 
+A second run, after failures came to be classified by TPM return code, gave the same
+results and the same unchanged state. The closed-gate refusal came back from this TPM as
+`TPM_RC_POLICY` ("policy failure in math operation or an invalid authPolicy value"),
+which is what `SEALED_KEY_DIGEST_MISMATCH` now requires.
+
 Left out on purpose: an owner-password change and `TPM2_Clear`, which would alter or
 destroy the other operating system's keys, and a blob moved to another TPM. The swtpm
 tests in `tests/integration/test_sealed_signing_key_swtpm.py` cover all three, along

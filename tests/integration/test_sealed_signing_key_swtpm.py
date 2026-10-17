@@ -323,3 +323,24 @@ def test_a_gate_index_with_another_profile_is_refused(tpm: Swtpm, store: SealedK
         _open(tpm, store, DIGEST_A)
     with tpm.context() as ectx, pytest.raises(SealedKeyUnavailable, match="profile"):
         seal.rotate_sealed_key(ectx, store, DIGEST_A)
+
+
+def test_a_tpm_failure_during_the_unseal_is_not_reported_as_a_mismatch(
+    tpm: Swtpm, store: SealedKeyStore
+) -> None:
+    """Only a policy refusal means the digest is wrong; anything else is the TPM failing."""
+    from tpm2_pytss.constants import TPM2_RC
+    from tpm2_pytss.TSS2_Exception import TSS2_Exception
+
+    _open(tpm, store, DIGEST_A)
+    blob = store.read().blobs[-1]  # type: ignore[union-attr]
+    with tpm.context() as ectx:
+        gate = ectx.tr_from_tpmpublic(seal.DEFAULT_GATE_NV_INDEX)
+
+        def retry(*_args: object, **_kwargs: object) -> None:
+            raise TSS2_Exception(int(TPM2_RC.RETRY))
+
+        ectx.unseal = retry  # type: ignore[method-assign]
+        with pytest.raises(SealedKeyUnavailable, match="failed while unsealing"):
+            seal._open_gate_and_unseal(ectx, blob, gate)
+    assert _gate_value(tpm) == GATE_SENTINEL

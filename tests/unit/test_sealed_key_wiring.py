@@ -143,3 +143,45 @@ def test_a_malformed_digest_is_a_usage_error(tmp_path: Path, value: str) -> None
     )
     result = _cli("key", "reseal", "--config", str(config_path), "--to-digest", value)
     assert result.exit_code == 2
+
+
+class _Refusal(Exception):
+    def __init__(self, error: int) -> None:
+        super().__init__(f"rc {error:#x}")
+        self.error = error
+
+
+@pytest.mark.parametrize(
+    ("error", "is_mismatch"),
+    [(0x126, True), (0x09D, True), (0x922, False), (0x101, False)],
+)
+def test_only_a_policy_refusal_counts_as_a_digest_mismatch(error: int, is_mismatch: bool) -> None:
+    from cmcp_runtime.tee.seal import _is_policy_refusal
+
+    assert _is_policy_refusal(_Refusal(error)) is is_mismatch
+    assert _is_policy_refusal(RuntimeError("no rc")) is False
+
+
+def test_key_commands_report_an_unusable_tpm_without_a_traceback(tmp_path: Path) -> None:
+    """No tpm2-pytss, no TPM, or the suite's own refusal: an error line and exit 1."""
+    config_path = _config(
+        tmp_path,
+        f"  provider: tpm\n  seal_signing_key: true\n  sealed_key_dir: {tmp_path / 's'}\n",
+    )
+    result = _cli("key", "reseal", "--config", str(config_path), "--to-digest", "ab" * 32)
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+    assert "Traceback" not in result.output
+
+
+def test_key_reseal_reports_an_unmeasurable_gateway_without_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)  # the default policy_bundle_path does not exist here
+    config_path = _config(
+        tmp_path,
+        f"  provider: tpm\n  seal_signing_key: true\n  sealed_key_dir: {tmp_path / 's'}\n",
+    )
+    result = _cli("key", "reseal", "--config", str(config_path))
+    assert result.exit_code == 1
+    assert "Cannot measure" in result.output

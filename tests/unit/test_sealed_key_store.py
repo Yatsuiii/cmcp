@@ -113,3 +113,21 @@ def test_an_opened_key_never_prints_its_seed() -> None:
     opened = seal.OpenedKey(seed=b"\xab" * 32, public_key=_PUBLIC, provisioned=False)
     assert ("ab" * 32) not in repr(opened)
     assert ("ab" * 32) not in str(opened)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
+def test_an_unusable_directory_is_a_sealed_key_error(tmp_path: Path) -> None:
+    """Startup reports SEALED_KEY_UNAVAILABLE rather than a raw OSError traceback."""
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions")
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o500)
+    try:
+        store = SealedKeyStore(locked / "sealed")
+        with pytest.raises(SealedKeyUnavailable, match="directory could not be used"):
+            store.acquire()
+        with pytest.raises(SealedKeyUnavailable, match="could not be written"):
+            store.write(StoreContents(seal.DEFAULT_GATE_NV_INDEX, _PUBLIC, (_blob(b"a"),)))
+    finally:
+        locked.chmod(0o700)
